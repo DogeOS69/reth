@@ -244,7 +244,7 @@ where
                 .await?;
 
             let rpc_consensus_client = DebugConsensusClient::new(
-                handle.node.add_ons_handle.beacon_engine_handle.clone(),
+                handle.node.rpc_handle().beacon_engine_handle.clone(),
                 Arc::new(block_provider),
             );
 
@@ -273,7 +273,7 @@ where
                 N::Types::rpc_to_primitive_block,
             );
             let rpc_consensus_client = DebugConsensusClient::new(
-                handle.node.add_ons_handle.beacon_engine_handle.clone(),
+                handle.node.rpc_handle().beacon_engine_handle.clone(),
                 Arc::new(block_provider),
             );
             handle

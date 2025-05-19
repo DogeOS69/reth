@@ -278,6 +278,12 @@ where
     T: FullNodeTypes,
     CB: NodeComponentsBuilder<T>,
     AO: RethRpcAddOns<NodeAdapter<T, CB::Components>>,
+    <AO as reth_node_api::NodeAddOns<
+        NodeAdapter<T, <CB as NodeComponentsBuilder<T>>::Components>,
+    >>::Handle: RpcHandleProvider<
+        NodeAdapter<T, <CB as NodeComponentsBuilder<T>>::Components>,
+        <AO as RethRpcAddOns<NodeAdapter<T, <CB as NodeComponentsBuilder<T>>::Components>>>::EthApi,
+    >,
 {
     /// Launches the node with the given launcher.
     pub fn launch_with<L>(self, launcher: L) -> L::Future

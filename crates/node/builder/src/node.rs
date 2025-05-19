@@ -158,15 +158,17 @@ where
     Payload: PayloadTypes,
     Node: FullNodeComponents<Types: NodeTypes<Payload = Payload>>,
     AddOns: RethRpcAddOns<Node>,
+    <AddOns as reth_node_api::NodeAddOns<Node>>::Handle:
+        RpcHandleProvider<Node, <AddOns as RethRpcAddOns<Node>>::EthApi>,
 {
     /// Returns the [`RpcServerHandle`] to the started rpc server.
-    pub const fn rpc_server_handle(&self) -> &RpcServerHandle {
-        &self.add_ons_handle.rpc_server_handles.rpc
+    pub fn rpc_server_handle(&self) -> &RpcServerHandle {
+        &self.add_ons_handle.rpc_handle().rpc_server_handles.rpc
     }
 
     /// Returns the [`AuthServerHandle`] to the started authenticated engine API server.
-    pub const fn auth_server_handle(&self) -> &AuthServerHandle {
-        &self.add_ons_handle.rpc_server_handles.auth
+    pub fn auth_server_handle(&self) -> &AuthServerHandle {
+        &self.add_ons_handle.rpc_handle().rpc_server_handles.auth
     }
 }
 
@@ -175,6 +177,8 @@ where
     Engine: EngineTypes,
     Node: FullNodeComponents<Types: NodeTypes<Payload = Engine>>,
     AddOns: RethRpcAddOns<Node>,
+    <AddOns as reth_node_api::NodeAddOns<Node>>::Handle:
+        RpcHandleProvider<Node, <AddOns as RethRpcAddOns<Node>>::EthApi>,
 {
     /// Returns the [`EngineApiClient`] interface for the authenticated engine API.
     ///

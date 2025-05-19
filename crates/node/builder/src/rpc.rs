@@ -1140,8 +1140,9 @@ where
 
 /// Helper trait implemented for add-ons producing [`RpcHandle`]. Used by common node launcher
 /// implementations.
-pub trait RethRpcAddOns<N: FullNodeComponents>:
-    NodeAddOns<N, Handle = RpcHandle<N, Self::EthApi>>
+pub trait RethRpcAddOns<N: FullNodeComponents>: NodeAddOns<N>
+where
+    Self::Handle: RpcHandleProvider<N, Self::EthApi>,
 {
     /// eth API implementation.
     type EthApi: EthApiTypes;

@@ -5,6 +5,7 @@ use node::NodeTestContext;
 use reth_chainspec::ChainSpec;
 use reth_db::{test_utils::TempDatabase, DatabaseEnv};
 use reth_network_api::test_utils::PeersHandleProvider;
+use reth_node_api::NodeAddOns;
 use reth_node_builder::{
     components::NodeComponentsBuilder,
     rpc::{EngineValidatorAddOn, RethRpcAddOns},
@@ -137,6 +138,14 @@ pub type Adapter<N, Provider = BlockchainProvider<NodeTypesWithDBAdapter<N, TmpD
         TmpNodeAdapter<N, Provider>,
     >>::Components,
 >;
+
+/// Type alias for a `NodeHandle` for a `TmpNodeAdapter`.
+pub type TmpNodeAddOnsHandle<N> =
+    <<N as Node<TmpNodeAdapter<N>>>::AddOns as NodeAddOns<Adapter<N>>>::Handle;
+
+/// Type alias for the `EthApi` for a `TmpNodeAdapter`.
+pub type TmpNodeEthApi<N> =
+    <<N as Node<TmpNodeAdapter<N>>>::AddOns as RethRpcAddOns<Adapter<N>>>::EthApi;
 
 /// Type alias for a type of `NodeHelper`
 pub type NodeHelperType<N, Provider = BlockchainProvider<NodeTypesWithDBAdapter<N, TmpDB>>> =

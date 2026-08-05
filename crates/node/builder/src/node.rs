@@ -3,8 +3,9 @@ use reth_db::DatabaseEnv;
 pub use reth_node_api::{FullNodeTypes, NodeTypes};
 
 use crate::{
-    components::NodeComponentsBuilder, rpc::RethRpcAddOns, NodeAdapter, NodeAddOns, NodeHandle,
-    RethFullAdapter,
+    components::NodeComponentsBuilder,
+    rpc::{RethRpcAddOns, RpcHandleProvider},
+    NodeAdapter, NodeAddOns, NodeHandle, RethFullAdapter,
 };
 use reth_node_api::{EngineTypes, FullNodeComponents, PayloadTypes};
 use reth_node_core::{

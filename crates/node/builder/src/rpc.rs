@@ -412,6 +412,27 @@ impl<Node: FullNodeComponents, EthApi: EthApiTypes> RpcHandle<Node, EthApi> {
     }
 }
 
+/// Provides access to the RPC handle from a node add-ons handle.
+pub trait RpcHandleProvider<Node: FullNodeComponents, EthApi: EthApiTypes> {
+    /// Returns the RPC handle.
+    fn rpc_handle(&self) -> &RpcHandle<Node, EthApi>;
+
+    /// Returns the mutable RPC handle.
+    fn rpc_handle_mut(&mut self) -> &mut RpcHandle<Node, EthApi>;
+}
+
+impl<Node: FullNodeComponents, EthApi: EthApiTypes> RpcHandleProvider<Node, EthApi>
+    for RpcHandle<Node, EthApi>
+{
+    fn rpc_handle(&self) -> &Self {
+        self
+    }
+
+    fn rpc_handle_mut(&mut self) -> &mut Self {
+        self
+    }
+}
+
 /// Handle returned when only the regular RPC server (HTTP/WS/IPC) is launched.
 ///
 /// This handle provides access to the RPC server endpoints and registry, but does not

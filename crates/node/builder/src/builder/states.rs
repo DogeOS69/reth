@@ -9,7 +9,7 @@ use crate::{
     components::{NodeComponents, NodeComponentsBuilder},
     hooks::NodeHooks,
     launch::LaunchNode,
-    rpc::{RethRpcAddOns, RethRpcServerHandles, RpcContext},
+    rpc::{RethRpcAddOns, RethRpcServerHandles, RpcContext, RpcHandleProvider},
     AddOns, ComponentsFor, FullNode,
 };
 

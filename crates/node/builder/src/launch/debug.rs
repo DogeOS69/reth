@@ -1,5 +1,8 @@
 use super::LaunchNode;
-use crate::{rpc::RethRpcAddOns, EngineNodeLauncher, Node, NodeHandle};
+use crate::{
+    rpc::{RethRpcAddOns, RpcHandleProvider},
+    EngineNodeLauncher, Node, NodeHandle,
+};
 use alloy_consensus::transaction::Either;
 use alloy_provider::network::AnyNetwork;
 use jsonrpsee::core::{DeserializeOwned, Serialize};
@@ -139,6 +142,7 @@ impl<L, Target, N, AddOns, B> DebugNodeLauncherFuture<L, Target, N, B>
 where
     N: FullNodeComponents<Types: DebugNode<N>>,
     AddOns: RethRpcAddOns<N>,
+    AddOns::Handle: RpcHandleProvider<N, AddOns::EthApi>,
     L: LaunchNode<Target, Node = NodeHandle<N, AddOns>>,
     B: BlockProvider<Block = BlockTy<N::Types>> + Clone,
 {
@@ -220,7 +224,7 @@ where
             info!(target: "reth::cli", "Using custom debug block provider");
 
             let rpc_consensus_client = DebugConsensusClient::new(
-                handle.node.add_ons_handle.beacon_engine_handle.clone(),
+                handle.node.add_ons_handle.rpc_handle().beacon_engine_handle.clone(),
                 Arc::new(provider),
             );
 
@@ -244,7 +248,7 @@ where
                 .await?;
 
             let rpc_consensus_client = DebugConsensusClient::new(
-                handle.node.rpc_handle().beacon_engine_handle.clone(),
+                handle.node.add_ons_handle.rpc_handle().beacon_engine_handle.clone(),
                 Arc::new(block_provider),
             );
 
@@ -273,7 +277,7 @@ where
                 N::Types::rpc_to_primitive_block,
             );
             let rpc_consensus_client = DebugConsensusClient::new(
-                handle.node.rpc_handle().beacon_engine_handle.clone(),
+                handle.node.add_ons_handle.rpc_handle().beacon_engine_handle.clone(),
                 Arc::new(block_provider),
             );
             handle
@@ -289,7 +293,8 @@ where
 
             let blockchain_db = handle.node.provider.clone();
             let chain_spec = config.chain.clone();
-            let beacon_engine_handle = handle.node.add_ons_handle.beacon_engine_handle.clone();
+            let beacon_engine_handle =
+                handle.node.add_ons_handle.rpc_handle().beacon_engine_handle.clone();
             let pool = handle.node.pool.clone();
             let payload_builder_handle = handle.node.payload_builder_handle.clone();
 
@@ -329,6 +334,7 @@ where
     Target: Send + 'static,
     N: FullNodeComponents<Types: DebugNode<N>>,
     AddOns: RethRpcAddOns<N> + 'static,
+    AddOns::Handle: RpcHandleProvider<N, AddOns::EthApi>,
     L: LaunchNode<Target, Node = NodeHandle<N, AddOns>> + 'static,
     B: BlockProvider<Block = BlockTy<N::Types>> + Clone + 'static,
 {
@@ -345,6 +351,7 @@ where
     Target: Send + 'static,
     N: FullNodeComponents<Types: DebugNode<N>>,
     AddOns: RethRpcAddOns<N> + 'static,
+    AddOns::Handle: RpcHandleProvider<N, AddOns::EthApi>,
     L: LaunchNode<Target, Node = NodeHandle<N, AddOns>> + 'static,
     DefaultDebugBlockProvider<N>: BlockProvider<Block = BlockTy<N::Types>> + Clone,
 {

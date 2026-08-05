@@ -3,7 +3,10 @@
 use crate::{
     common::{Attached, LaunchContextWith, WithConfigs},
     hooks::NodeHooks,
-    rpc::{EngineShutdown, EngineValidatorAddOn, EngineValidatorBuilder, RethRpcAddOns, RpcHandle},
+    rpc::{
+        EngineShutdown, EngineValidatorAddOn, EngineValidatorBuilder, RethRpcAddOns,
+        RpcHandleProvider,
+    },
     setup::build_networked_pipeline,
     AddOns, AddOnsContext, FullNode, LaunchContext, LaunchNode, NodeAdapter,
     NodeBuilderWithComponents, NodeComponents, NodeComponentsBuilder, NodeHandle, NodeTypesAdapter,
@@ -77,6 +80,7 @@ impl EngineNodeLauncher {
         CB: NodeComponentsBuilder<T>,
         AO: RethRpcAddOns<NodeAdapter<T, CB::Components>>
             + EngineValidatorAddOn<NodeAdapter<T, CB::Components>>,
+        AO::Handle: RpcHandleProvider<NodeAdapter<T, CB::Components>, AO::EthApi>,
     {
         let Self { ctx, engine_tree_config } = self;
         let NodeBuilderWithComponents {
@@ -265,13 +269,8 @@ impl EngineNodeLauncher {
             ),
         );
 
-        let RpcHandle {
-            rpc_server_handles,
-            rpc_registry,
-            engine_events,
-            beacon_engine_handle,
-            engine_shutdown: _,
-        } = add_ons.launch_add_ons(add_ons_ctx).await?;
+        let mut add_ons_handle = add_ons.launch_add_ons(add_ons_ctx).await?;
+        let engine_events = add_ons_handle.rpc_handle().engine_events.clone();
 
         // Create engine shutdown handle
         let (engine_shutdown, shutdown_rx) = EngineShutdown::new();
@@ -394,6 +393,7 @@ impl EngineNodeLauncher {
 
         let engine_events_for_ethstats = engine_events.new_listener();
 
+        add_ons_handle.rpc_handle_mut().engine_shutdown = engine_shutdown;
         let full_node = FullNode {
             evm_config: ctx.components().evm_config().clone(),
             pool: ctx.components().pool().clone(),
@@ -403,13 +403,7 @@ impl EngineNodeLauncher {
             task_executor: ctx.task_executor().clone(),
             config: ctx.node_config().clone(),
             data_dir: ctx.data_dir().clone(),
-            add_ons_handle: RpcHandle {
-                rpc_server_handles,
-                rpc_registry,
-                engine_events,
-                beacon_engine_handle,
-                engine_shutdown,
-            },
+            add_ons_handle,
         };
         // Notify on node started
         on_node_started.on_event(FullNode::clone(&full_node))?;
@@ -437,6 +431,7 @@ where
     AO: RethRpcAddOns<NodeAdapter<T, CB::Components>>
         + EngineValidatorAddOn<NodeAdapter<T, CB::Components>>
         + 'static,
+    AO::Handle: RpcHandleProvider<NodeAdapter<T, CB::Components>, AO::EthApi>,
 {
     type Node = NodeHandle<NodeAdapter<T, CB::Components>, AO>;
     type Future = Pin<Box<dyn Future<Output = eyre::Result<Self::Node>> + Send>>;

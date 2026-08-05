@@ -4,6 +4,7 @@ use crate::{
     error::NetworkError,
     import::{BlockImport, ProofOfStakeBlockImport},
     transactions::TransactionsManagerConfig,
+    transform::header::HeaderTransform,
     NetworkHandle, NetworkManager,
 };
 use alloy_eips::BlockNumHash;
@@ -97,6 +98,8 @@ pub struct NetworkConfig<C, N: NetworkPrimitives = EthNetworkPrimitives> {
     /// List of block number-hash pairs to check for required blocks.
     /// If non-empty, peers that don't have these blocks will be filtered out.
     pub required_block_hashes: Vec<BlockNumHash>,
+    /// Transform applied to headers received from peers before validation and persistence.
+    pub header_transform: Arc<dyn HeaderTransform<N::BlockHeader>>,
 }
 
 // === impl NetworkConfig ===
@@ -158,6 +161,8 @@ where
         + HeaderProvider
         + Clone
         + Unpin
+        + Send
+        + Sync
         + 'static,
 {
     /// Starts the networking stack given a [`NetworkConfig`] and returns a handle to the network.
@@ -165,7 +170,7 @@ where
         let client = self.client.clone();
         let (handle, network, _txpool, eth) = NetworkManager::builder::<C>(self)
             .await?
-            .request_handler::<C>(client)
+            .request_handler::<C>(client, None)
             .split_with_handle();
 
         tokio::task::spawn(network);
@@ -220,6 +225,8 @@ pub struct NetworkConfigBuilder<N: NetworkPrimitives = EthNetworkPrimitives> {
     required_block_hashes: Vec<BlockNumHash>,
     /// Optional network id
     network_id: Option<u64>,
+    /// Transform applied to headers received from peers.
+    header_transform: Arc<dyn HeaderTransform<N::BlockHeader>>,
 }
 
 impl NetworkConfigBuilder<EthNetworkPrimitives> {
@@ -262,6 +269,7 @@ impl<N: NetworkPrimitives> NetworkConfigBuilder<N> {
             handshake: Arc::new(EthHandshake::default()),
             required_block_hashes: Vec::new(),
             network_id: None,
+            header_transform: Arc::new(()),
         }
     }
 
@@ -620,6 +628,7 @@ impl<N: NetworkPrimitives> NetworkConfigBuilder<N> {
             handshake,
             required_block_hashes,
             network_id,
+            header_transform,
         } = self;
 
         let head = head.unwrap_or_else(|| Head {
@@ -691,6 +700,7 @@ impl<N: NetworkPrimitives> NetworkConfigBuilder<N> {
             nat,
             handshake,
             required_block_hashes,
+            header_transform,
         }
     }
 }

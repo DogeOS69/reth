@@ -20,6 +20,7 @@ use reth_network::{
         config::{AnnouncementFilteringPolicy, StrictEthAnnouncementFilter},
         TransactionPropagationPolicy, TransactionsManagerConfig,
     },
+    transform::header::HeaderResponseTransform,
     NetworkBuilder, NetworkConfig, NetworkConfigBuilder, NetworkHandle, NetworkManager,
     NetworkPrimitives,
 };
@@ -829,6 +830,7 @@ impl<Node: FullNodeTypes> BuilderContext<Node> {
         &self,
         builder: NetworkBuilder<(), (), N>,
         pool: Pool,
+        request_transform: Option<Arc<dyn HeaderResponseTransform<N::BlockHeader>>>,
     ) -> NetworkHandle<N>
     where
         N: NetworkPrimitives,
@@ -846,6 +848,7 @@ impl<Node: FullNodeTypes> BuilderContext<Node> {
             pool,
             self.config().network.transactions_manager_config(),
             self.config().network.tx_propagation_policy,
+            request_transform,
         )
     }
 
@@ -862,6 +865,7 @@ impl<Node: FullNodeTypes> BuilderContext<Node> {
         pool: Pool,
         tx_config: TransactionsManagerConfig,
         propagation_policy: Policy,
+        request_transform: Option<Arc<dyn HeaderResponseTransform<N::BlockHeader>>>,
     ) -> NetworkHandle<N>
     where
         N: NetworkPrimitives,
@@ -881,6 +885,7 @@ impl<Node: FullNodeTypes> BuilderContext<Node> {
             tx_config,
             propagation_policy,
             StrictEthAnnouncementFilter::default(),
+            request_transform,
         )
     }
 
@@ -899,6 +904,7 @@ impl<Node: FullNodeTypes> BuilderContext<Node> {
         tx_config: TransactionsManagerConfig,
         propagation_policy: PropPolicy,
         announcement_policy: AnnPolicy,
+        request_transform: Option<Arc<dyn HeaderResponseTransform<N::BlockHeader>>>,
     ) -> NetworkHandle<N>
     where
         N: NetworkPrimitives,
@@ -915,7 +921,7 @@ impl<Node: FullNodeTypes> BuilderContext<Node> {
     {
         let (handle, network, txpool, eth) = builder
             .transactions_with_policies(pool, tx_config, propagation_policy, announcement_policy)
-            .request_handler(self.provider().clone())
+            .request_handler(self.provider().clone(), request_transform)
             .split_with_handle();
 
         self.executor.spawn_critical_blocking_task("p2p txpool", txpool);

@@ -248,6 +248,7 @@ where
             Header = alloy_consensus::Header,
         > + HeaderProvider
         + Clone
+        + Sync
         + Unpin
         + 'static,
     Pool: TransactionPool<
@@ -319,6 +320,7 @@ where
             Receipt = reth_ethereum_primitives::Receipt,
             Header = alloy_consensus::Header,
         > + HeaderProvider
+        + Sync
         + Unpin
         + 'static,
     Pool: TransactionPool<
@@ -466,7 +468,7 @@ where
         let (tx, rx) = channel(ETH_REQUEST_CHANNEL_CAPACITY);
         self.network.set_eth_request_handler(tx);
         let peers = self.network.peers_handle();
-        let request_handler = EthRequestHandler::new(self.client.clone(), peers, rx);
+        let request_handler = EthRequestHandler::new(self.client.clone(), peers, rx, None);
         self.request_handler = Some(request_handler);
     }
 
@@ -573,6 +575,7 @@ where
             Receipt = reth_ethereum_primitives::Receipt,
             Header = alloy_consensus::Header,
         > + HeaderProvider
+        + Sync
         + Unpin
         + 'static,
     Pool: TransactionPool<

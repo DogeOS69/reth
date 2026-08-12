@@ -4,6 +4,7 @@ use crate::{
     error::NetworkError,
     import::{BlockImport, ProofOfStakeBlockImport},
     transactions::TransactionsManagerConfig,
+    transform::header::HeaderTransform,
     NetworkHandle, NetworkManager,
 };
 use alloy_eips::BlockNumHash;
@@ -97,6 +98,9 @@ pub struct NetworkConfig<C, N: NetworkPrimitives = EthNetworkPrimitives> {
     /// List of block number-hash pairs to check for required blocks.
     /// If non-empty, peers that don't have these blocks will be filtered out.
     pub required_block_hashes: Vec<BlockNumHash>,
+    /// Optional transform applied to headers received from peers before downloader validation and
+    /// persistence.
+    pub header_transform: Option<Arc<dyn HeaderTransform<N::BlockHeader>>>,
 }
 
 // === impl NetworkConfig ===
@@ -691,6 +695,7 @@ impl<N: NetworkPrimitives> NetworkConfigBuilder<N> {
             nat,
             handshake,
             required_block_hashes,
+            header_transform: None,
         }
     }
 }

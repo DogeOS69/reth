@@ -8987,6 +8987,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "aquamarine",
+ "async-trait",
  "auto_impl",
  "derive_more",
  "discv5",

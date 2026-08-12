@@ -4,7 +4,7 @@ mod client;
 
 pub use client::FetchClient;
 
-use crate::{message::BlockRequest, session::BlockRangeInfo};
+use crate::{message::BlockRequest, session::BlockRangeInfo, transform::header::HeaderTransform};
 use alloy_primitives::B256;
 use futures::StreamExt;
 use reth_eth_wire::{
@@ -62,12 +62,18 @@ pub struct StateFetcher<N: NetworkPrimitives = EthNetworkPrimitives> {
     download_requests_rx: UnboundedReceiverStream<DownloadRequest<N>>,
     /// Sender for download requests, used to detach a [`FetchClient`]
     download_requests_tx: UnboundedSender<DownloadRequest<N>>,
+    /// Optional transform applied to headers received from peers.
+    header_transform: Option<Arc<dyn HeaderTransform<N::BlockHeader>>>,
 }
 
 // === impl StateSyncer ===
 
 impl<N: NetworkPrimitives> StateFetcher<N> {
-    pub(crate) fn new(peers_handle: PeersHandle, num_active_peers: Arc<AtomicUsize>) -> Self {
+    pub(crate) fn new(
+        peers_handle: PeersHandle,
+        num_active_peers: Arc<AtomicUsize>,
+        header_transform: Option<Arc<dyn HeaderTransform<N::BlockHeader>>>,
+    ) -> Self {
         let (download_requests_tx, download_requests_rx) = mpsc::unbounded_channel();
         Self {
             inflight_headers_requests: Default::default(),
@@ -79,6 +85,7 @@ impl<N: NetworkPrimitives> StateFetcher<N> {
             queued_requests: Default::default(),
             download_requests_rx: UnboundedReceiverStream::new(download_requests_rx),
             download_requests_tx,
+            header_transform,
         }
     }
 
@@ -301,8 +308,17 @@ impl<N: NetworkPrimitives> StateFetcher<N> {
             resp.as_ref().is_some_and(|r| res.is_likely_bad_headers_response(&r.request));
 
         if let Some(resp) = resp {
-            // delegate the response
-            let _ = resp.response.send(res.map(|h| (peer_id, h).into()));
+            match (self.header_transform.clone(), res) {
+                (Some(header_transform), Ok(headers)) => {
+                    tokio::spawn(async move {
+                        let headers = header_transform.map(headers).await;
+                        let _ = resp.response.send(Ok((peer_id, headers).into()));
+                    });
+                }
+                (_, res) => {
+                    let _ = resp.response.send(res.map(|headers| (peer_id, headers).into()));
+                }
+            }
         }
 
         if let Some(peer) = self.peers.get_mut(&peer_id) {
@@ -636,11 +652,24 @@ mod tests {
     use alloy_primitives::B512;
     use std::future::poll_fn;
 
+    #[derive(Debug)]
+    struct OffsetHeaderNumbers;
+
+    #[async_trait::async_trait]
+    impl HeaderTransform<Header> for OffsetHeaderNumbers {
+        async fn map(&self, mut headers: Vec<Header>) -> Vec<Header> {
+            for header in &mut headers {
+                header.number += 100;
+            }
+            headers
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_poll_fetcher() {
         let manager = PeersManager::new(PeersConfig::default());
         let mut fetcher =
-            StateFetcher::<EthNetworkPrimitives>::new(manager.handle(), Default::default());
+            StateFetcher::<EthNetworkPrimitives>::new(manager.handle(), Default::default(), None);
 
         poll_fn(move |cx| {
             assert!(fetcher.poll(cx).is_pending());
@@ -662,7 +691,7 @@ mod tests {
     async fn test_peer_rotation() {
         let manager = PeersManager::new(PeersConfig::default());
         let mut fetcher =
-            StateFetcher::<EthNetworkPrimitives>::new(manager.handle(), Default::default());
+            StateFetcher::<EthNetworkPrimitives>::new(manager.handle(), Default::default(), None);
         // Add a few random peers
         let peer1 = B512::random();
         let peer2 = B512::random();
@@ -701,7 +730,7 @@ mod tests {
     async fn test_peer_prioritization() {
         let manager = PeersManager::new(PeersConfig::default());
         let mut fetcher =
-            StateFetcher::<EthNetworkPrimitives>::new(manager.handle(), Default::default());
+            StateFetcher::<EthNetworkPrimitives>::new(manager.handle(), Default::default(), None);
         // Add a few random peers
         let peer1 = B512::random();
         let peer2 = B512::random();
@@ -749,7 +778,7 @@ mod tests {
     async fn test_on_block_headers_response() {
         let manager = PeersManager::new(PeersConfig::default());
         let mut fetcher =
-            StateFetcher::<EthNetworkPrimitives>::new(manager.handle(), Default::default());
+            StateFetcher::<EthNetworkPrimitives>::new(manager.handle(), Default::default(), None);
         let peer_id = B512::random();
 
         assert_eq!(fetcher.on_block_headers_response(peer_id, Ok(vec![Header::default()])), None);
@@ -777,10 +806,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_downloaded_headers_without_transform_are_delivered_synchronously() {
+        let manager = PeersManager::new(PeersConfig::default());
+        let mut fetcher =
+            StateFetcher::<EthNetworkPrimitives>::new(manager.handle(), Default::default(), None);
+        let peer_id = B512::random();
+        let (tx, mut rx) = oneshot::channel();
+        fetcher.inflight_headers_requests.insert(
+            peer_id,
+            Request { request: HeadersRequest::falling(2u64.into(), 2), response: tx },
+        );
+
+        let headers = vec![
+            Header { number: 2, ..Default::default() },
+            Header { number: 1, ..Default::default() },
+        ];
+        assert_eq!(fetcher.on_block_headers_response(peer_id, Ok(headers.clone())), None);
+
+        let response = rx.try_recv().expect("response should be sent synchronously").unwrap();
+        let (response_peer_id, response_headers) = response.split();
+        assert_eq!(response_peer_id, peer_id);
+        assert_eq!(response_headers, headers);
+    }
+
+    #[tokio::test]
+    async fn test_downloaded_headers_are_transformed_in_order() {
+        let manager = PeersManager::new(PeersConfig::default());
+        let mut fetcher = StateFetcher::<EthNetworkPrimitives>::new(
+            manager.handle(),
+            Default::default(),
+            Some(Arc::new(OffsetHeaderNumbers)),
+        );
+        let peer_id = B512::random();
+        let (tx, rx) = oneshot::channel();
+        fetcher.inflight_headers_requests.insert(
+            peer_id,
+            Request { request: HeadersRequest::falling(2u64.into(), 2), response: tx },
+        );
+
+        let headers = vec![
+            Header { number: 2, ..Default::default() },
+            Header { number: 1, ..Default::default() },
+        ];
+        assert_eq!(fetcher.on_block_headers_response(peer_id, Ok(headers)), None);
+
+        let response = rx.await.expect("response sender should remain open").unwrap();
+        let (response_peer_id, response_headers) = response.split();
+        assert_eq!(response_peer_id, peer_id);
+        assert_eq!(
+            response_headers.iter().map(|header| header.number).collect::<Vec<_>>(),
+            vec![102, 101]
+        );
+    }
+
+    #[tokio::test]
     async fn test_header_response_outcome() {
         let manager = PeersManager::new(PeersConfig::default());
         let mut fetcher =
-            StateFetcher::<EthNetworkPrimitives>::new(manager.handle(), Default::default());
+            StateFetcher::<EthNetworkPrimitives>::new(manager.handle(), Default::default(), None);
         let peer_id = B512::random();
 
         let request_pair = || {
@@ -1200,7 +1283,7 @@ mod tests {
     fn fetcher_with_peer() -> (StateFetcher<EthNetworkPrimitives>, PeerId) {
         let manager = PeersManager::new(PeersConfig::default());
         let mut fetcher =
-            StateFetcher::<EthNetworkPrimitives>::new(manager.handle(), Default::default());
+            StateFetcher::<EthNetworkPrimitives>::new(manager.handle(), Default::default(), None);
         let peer_id = B512::random();
 
         fetcher.new_active_peer(

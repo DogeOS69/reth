@@ -1427,17 +1427,27 @@ pub fn ensure_intrinsic_gas<T: EthPoolTransaction>(
 mod tests {
     use super::*;
     use crate::{
-        blobstore::InMemoryBlobStore, error::PoolErrorKind, traits::PoolTransaction,
-        CoinbaseTipOrdering, EthPooledTransaction, Pool, TransactionPool,
+        blobstore::InMemoryBlobStore, error::PoolErrorKind, test_utils::TransactionBuilder,
+        traits::PoolTransaction, CoinbaseTipOrdering, EthPooledTransaction, Pool, TransactionPool,
     };
     use alloy_consensus::Transaction;
     use alloy_eips::eip2718::Decodable2718;
-    use alloy_primitives::{hex, Bytes, U256};
+    use alloy_genesis::{Genesis, GenesisAccount};
+    use alloy_primitives::{hex, keccak256, Address, Bytes, B256, U256};
+    use reth_chainspec::{ChainSpec, MAINNET};
+    use reth_db_common::init::init_genesis_with_settings;
     use reth_ethereum_primitives::PooledTransactionVariant;
     use reth_evm_ethereum::EthEvmConfig;
     use reth_primitives_traits::SignedTransaction;
-    use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
+    use reth_provider::{
+        providers::BlockchainProvider,
+        test_utils::{
+            create_test_provider_factory_with_chain_spec, ExtendedAccount, MockEthProvider,
+        },
+    };
+    use reth_storage_api::{AccountReader, StateProviderFactory, StorageSettings};
     use revm_primitives::eip3860::MAX_INITCODE_SIZE;
+    use std::{collections::BTreeMap, sync::Arc};
 
     fn test_evm_config() -> EthEvmConfig {
         EthEvmConfig::mainnet()
@@ -1450,6 +1460,20 @@ mod tests {
         let tx = PooledTransactionVariant::decode_2718(&mut data.as_ref()).unwrap();
 
         EthPooledTransaction::from_pooled(tx.try_into_recovered().unwrap())
+    }
+
+    fn transaction_from_signer(signer: B256) -> EthPooledTransaction {
+        let transaction = TransactionBuilder::default()
+            .signer(signer)
+            .chain_id(MAINNET.chain.id())
+            .gas_limit(21_000)
+            .max_fee_per_gas(1_000_000_000)
+            .max_priority_fee_per_gas(1_000_000_000)
+            .to(Address::ZERO)
+            .into_eip1559()
+            .try_into_recovered()
+            .unwrap();
+        EthPooledTransaction::try_from_consensus(transaction).unwrap()
     }
 
     // <https://github.com/paradigmxyz/reth/issues/5178>
@@ -1511,6 +1535,137 @@ mod tests {
 
         assert!(outcome.is_valid());
     }
+
+    #[test]
+    fn enforces_sender_bytecode_boundaries() {
+        let transaction = get_transaction();
+        let provider = MockEthProvider::default().with_genesis_block();
+        let nonempty_code = Bytes::from_static(&[0x00]);
+        let nonempty_hash = keccak256(&nonempty_code);
+        provider.add_account(
+            Address::with_last_byte(1),
+            ExtendedAccount::new(0, U256::ZERO).with_bytecode(nonempty_code),
+        );
+        let mut delegation_code = vec![0xef, 0x01, 0x00];
+        delegation_code.extend_from_slice(Address::with_last_byte(2).as_slice());
+        let delegation_code = Bytes::from(delegation_code);
+        let delegation_hash = keccak256(&delegation_code);
+        provider.add_account(
+            Address::with_last_byte(2),
+            ExtendedAccount::new(0, U256::ZERO).with_bytecode(delegation_code),
+        );
+
+        let before_prague =
+            EthTransactionValidatorBuilder::new(provider.clone(), test_evm_config())
+                .no_prague()
+                .build(InMemoryBlobStore::default());
+        let no_code = Account { balance: U256::MAX, ..Default::default() };
+        let empty_code =
+            Account { balance: U256::MAX, bytecode_hash: Some(KECCAK_EMPTY), ..Default::default() };
+        let nonempty_code = Account {
+            balance: U256::MAX,
+            bytecode_hash: Some(nonempty_hash),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            before_prague.validate_sender_bytecode(&transaction, &no_code, &provider),
+            Ok(Ok(()))
+        ));
+        assert!(matches!(
+            before_prague.validate_sender_bytecode(&transaction, &empty_code, &provider),
+            Ok(Ok(()))
+        ));
+        assert!(matches!(
+            before_prague.validate_sender_bytecode(&transaction, &nonempty_code, &provider),
+            Ok(Err(InvalidPoolTransactionError::Consensus(
+                InvalidTransactionError::SignerAccountHasBytecode
+            )))
+        ));
+
+        let after_prague = EthTransactionValidatorBuilder::new(provider.clone(), test_evm_config())
+            .set_prague(true)
+            .build(InMemoryBlobStore::default());
+        let delegation_code = Account {
+            balance: U256::MAX,
+            bytecode_hash: Some(delegation_hash),
+            ..Default::default()
+        };
+
+        assert!(matches!(
+            after_prague.validate_sender_bytecode(&transaction, &delegation_code, &provider),
+            Ok(Ok(()))
+        ));
+        assert!(matches!(
+            after_prague.validate_sender_bytecode(&transaction, &nonempty_code, &provider),
+            Ok(Err(InvalidPoolTransactionError::Consensus(
+                InvalidTransactionError::SignerAccountHasBytecode
+            )))
+        ));
+    }
+
+    #[test]
+    fn validates_empty_code_sender_from_storage_v2_genesis() {
+        let empty_code_transaction = transaction_from_signer(B256::with_last_byte(1));
+        let nonempty_code_transaction = transaction_from_signer(B256::with_last_byte(2));
+        let empty_code_sender = empty_code_transaction.sender();
+        let nonempty_code_sender = nonempty_code_transaction.sender();
+        let nonempty_code = Bytes::from_static(&[0x00]);
+        let genesis = Genesis {
+            gas_limit: 30_000_000,
+            alloc: BTreeMap::from([
+                (
+                    empty_code_sender,
+                    GenesisAccount {
+                        balance: U256::MAX,
+                        code: Some(Bytes::new()),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    nonempty_code_sender,
+                    GenesisAccount {
+                        balance: U256::MAX,
+                        code: Some(nonempty_code.clone()),
+                        ..Default::default()
+                    },
+                ),
+            ]),
+            ..Default::default()
+        };
+        let chain_spec = Arc::new(
+            ChainSpec::builder().chain(MAINNET.chain).genesis(genesis).prague_activated().build(),
+        );
+        let factory = create_test_provider_factory_with_chain_spec(chain_spec);
+        init_genesis_with_settings(&factory, StorageSettings::v2()).unwrap();
+        let provider = BlockchainProvider::new(factory).unwrap();
+
+        let state = provider.latest().unwrap();
+        assert_eq!(
+            state.basic_account(&empty_code_sender).unwrap().unwrap().bytecode_hash,
+            Some(KECCAK_EMPTY)
+        );
+        assert_eq!(
+            state.basic_account(&nonempty_code_sender).unwrap().unwrap().bytecode_hash,
+            Some(keccak256(&nonempty_code))
+        );
+        drop(state);
+
+        let validator = EthTransactionValidatorBuilder::new(provider, test_evm_config())
+            .build(InMemoryBlobStore::default());
+        assert!(validator
+            .validate_one(TransactionOrigin::External, empty_code_transaction)
+            .is_valid());
+        assert!(matches!(
+            validator
+                .validate_one(TransactionOrigin::External, nonempty_code_transaction)
+                .as_invalid(),
+            Some(InvalidPoolTransactionError::Consensus(
+                InvalidTransactionError::SignerAccountHasBytecode
+            ))
+        ));
+    }
+
     // <https://github.com/paradigmxyz/reth/issues/8550>
     #[tokio::test]
     async fn invalid_on_gas_limit_too_high() {

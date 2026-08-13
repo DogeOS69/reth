@@ -29,3 +29,15 @@ This branch is based on Reth `eb4c15e5e36d8776d46629beae4c0a69af7ab04f` (`v2.0.0
   historical headers from geth peers during the compatibility window.
 - **Removal condition:** remove this patch after all nodes have migrated to Reth and the controlled
   compatibility window has ended.
+
+## EIP-3607 empty-code sender validation
+
+- **Scope:** `reth-transaction-pool` sender bytecode validation.
+- **Source:** focused backport of upstream Reth commit
+  `62808bd060e4c7398e3fb6df93881950b1433b18` (PR #26644).
+- **Purpose:** treat `KECCAK_EMPTY` as no deployed code so genesis accounts declared with explicit
+  empty code remain valid EIP-3607 senders.
+- **Compatibility:** nonempty code remains rejected before Prague; after Prague, only valid EIP-7702
+  delegation code remains accepted.
+- **Removal condition:** remove the backport when the selected upstream Reth base contains PR
+  #26644 or equivalent EIP-3607 empty-code handling.

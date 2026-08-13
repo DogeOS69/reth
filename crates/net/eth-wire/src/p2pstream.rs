@@ -434,6 +434,22 @@ where
                 }
             }
 
+            if id == P2PMessageID::Ping as u8 || id == P2PMessageID::Pong as u8 {
+                validate_ping_pong_payload(&mut this.decoder, id, &bytes[1..])?;
+
+                if id == P2PMessageID::Ping as u8 {
+                    trace!("Received Ping, Sending Pong");
+                    this.send_pong();
+                    // This is required because the `Sink` may not be polled externally, and if
+                    // that happens, the pong will never be sent.
+                    cx.waker().wake_by_ref();
+                } else {
+                    // if we were waiting for a pong, this will reset the pinger state
+                    this.pinger.on_pong()?;
+                }
+                continue
+            }
+
             // first check that the compressed message length does not exceed the max
             // payload size
             let decompressed_len = snap::raw::decompress_len(&bytes[1..])?;
@@ -460,23 +476,12 @@ where
             })?;
 
             match id {
-                _ if id == P2PMessageID::Ping as u8 => {
-                    trace!("Received Ping, Sending Pong");
-                    this.send_pong();
-                    // This is required because the `Sink` may not be polled externally, and if
-                    // that happens, the pong will never be sent.
-                    cx.waker().wake_by_ref();
-                }
                 _ if id == P2PMessageID::Hello as u8 => {
                     // we have received a hello message outside of the handshake, so we will return
                     // an error
                     return Poll::Ready(Some(Err(P2PStreamError::HandshakeError(
                         P2PHandshakeError::HelloNotInHandshake,
                     ))))
-                }
-                _ if id == P2PMessageID::Pong as u8 => {
-                    // if we were waiting for a pong, this will reset the pinger state
-                    this.pinger.on_pong()?
                 }
                 _ if id == P2PMessageID::Disconnect as u8 => {
                     // At this point, the `decompress_buf` contains the snappy decompressed
@@ -528,6 +533,25 @@ where
 
         Poll::Pending
     }
+}
+
+/// Validates a compressed Ping or Pong payload without allocating from its advertised size.
+fn validate_ping_pong_payload(
+    decoder: &mut snap::raw::Decoder,
+    message_id: u8,
+    compressed_payload: &[u8],
+) -> Result<(), P2PStreamError> {
+    if snap::raw::decompress_len(compressed_payload)? != 1 {
+        return Err(P2PStreamError::InvalidPingPongPayload(message_id))
+    }
+
+    let mut payload = [0u8; 1];
+    decoder.decompress(compressed_payload, &mut payload)?;
+    if payload != [EMPTY_LIST_CODE] {
+        return Err(P2PStreamError::InvalidPingPongPayload(message_id))
+    }
+
+    Ok(())
 }
 
 impl<S> Sink<Bytes> for P2PStream<S>
@@ -798,9 +822,133 @@ impl TryFrom<u8> for P2PMessageID {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{capability::SharedCapability, test_utils::eth_hello, EthVersion, ProtocolVersion};
+    use crate::{
+        capability::SharedCapability, test_utils::eth_hello, Capability, EthVersion,
+        ProtocolVersion,
+    };
+    use futures::task::noop_waker_ref;
     use tokio::net::{TcpListener, TcpStream};
     use tokio_util::codec::Decoder;
+
+    /// A transport that yields queued incoming frames and accepts everything sent to it.
+    #[derive(Default)]
+    struct IncomingFramesTransport {
+        incoming: VecDeque<io::Result<BytesMut>>,
+    }
+
+    impl Stream for IncomingFramesTransport {
+        type Item = io::Result<BytesMut>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            match self.incoming.pop_front() {
+                Some(item) => Poll::Ready(Some(item)),
+                None => Poll::Pending,
+            }
+        }
+    }
+
+    impl Sink<Bytes> for IncomingFramesTransport {
+        type Error = io::Error;
+
+        fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, _: Bytes) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn eth_shared_capabilities() -> SharedCapabilities {
+        SharedCapabilities::try_new(
+            vec![EthVersion::Eth68.into()],
+            vec![Capability::eth(EthVersion::Eth68)],
+        )
+        .unwrap()
+    }
+
+    fn stream_with_incoming(frame: BytesMut) -> P2PStream<IncomingFramesTransport> {
+        let mut transport = IncomingFramesTransport::default();
+        transport.incoming.push_back(Ok(frame));
+        P2PStream::new(transport, eth_shared_capabilities())
+    }
+
+    fn compressed_p2p_message(message_id: P2PMessageID, payload: &[u8]) -> BytesMut {
+        let mut message = BytesMut::from([message_id as u8].as_slice());
+        message.extend_from_slice(&snap::raw::Encoder::new().compress_vec(payload).unwrap());
+        message
+    }
+
+    #[tokio::test]
+    async fn rejects_ping_pong_with_oversized_payload_before_decompression() {
+        const SIXTEEN_MIB_SNAPPY_HEADER: [u8; 4] = [0x80, 0x80, 0x80, 0x08];
+
+        for message_id in [P2PMessageID::Ping, P2PMessageID::Pong] {
+            let frame = BytesMut::from(
+                [
+                    message_id as u8,
+                    SIXTEEN_MIB_SNAPPY_HEADER[0],
+                    SIXTEEN_MIB_SNAPPY_HEADER[1],
+                    SIXTEEN_MIB_SNAPPY_HEADER[2],
+                    SIXTEEN_MIB_SNAPPY_HEADER[3],
+                ]
+                .as_slice(),
+            );
+            assert_eq!(snap::raw::decompress_len(&frame[1..]).unwrap(), MAX_PAYLOAD_SIZE);
+
+            let mut stream = stream_with_incoming(frame);
+            let waker = noop_waker_ref();
+            let mut cx = Context::from_waker(waker);
+
+            match Pin::new(&mut stream).poll_next(&mut cx) {
+                Poll::Ready(Some(Err(P2PStreamError::InvalidPingPongPayload(id)))) => {
+                    assert_eq!(id, message_id as u8)
+                }
+                result => panic!("unexpected poll result: {result:?}"),
+            }
+            assert!(stream.outgoing_messages.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_ping_pong_with_non_list_payload() {
+        for message_id in [P2PMessageID::Ping, P2PMessageID::Pong] {
+            let frame = compressed_p2p_message(message_id, &[alloy_rlp::EMPTY_STRING_CODE]);
+            let mut stream = stream_with_incoming(frame);
+            let waker = noop_waker_ref();
+            let mut cx = Context::from_waker(waker);
+
+            assert!(matches!(
+                Pin::new(&mut stream).poll_next(&mut cx),
+                Poll::Ready(Some(Err(P2PStreamError::InvalidPingPongPayload(id))))
+                    if id == message_id as u8
+            ));
+            assert!(stream.outgoing_messages.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn accepts_ping_with_empty_list_payload() {
+        let ping = alloy_rlp::encode(P2PMessage::Ping);
+        let mut stream = stream_with_incoming(BytesMut::from(ping.as_slice()));
+        let waker = noop_waker_ref();
+        let mut cx = Context::from_waker(waker);
+
+        assert!(Pin::new(&mut stream).poll_next(&mut cx).is_pending());
+        assert_eq!(stream.outgoing_messages.len(), 1);
+        assert_eq!(
+            stream.outgoing_messages.front().unwrap().as_ref(),
+            alloy_rlp::encode(P2PMessage::Pong).as_slice()
+        );
+    }
 
     #[tokio::test]
     async fn test_can_disconnect() {

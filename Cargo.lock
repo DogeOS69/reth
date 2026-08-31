@@ -8987,6 +8987,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "aquamarine",
+ "async-trait",
  "auto_impl",
  "derive_more",
  "discv5",
@@ -10374,6 +10375,7 @@ version = "2.0.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
+ "alloy-genesis",
  "alloy-primitives",
  "alloy-rlp",
  "aquamarine",
@@ -10391,6 +10393,7 @@ dependencies = [
  "rand 0.9.2",
  "reth-chain-state",
  "reth-chainspec",
+ "reth-db-common",
  "reth-eth-wire-types",
  "reth-ethereum-primitives",
  "reth-evm",

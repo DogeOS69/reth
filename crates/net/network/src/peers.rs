@@ -970,16 +970,12 @@ impl PeersManager {
     /// Removes the tracked node from the trusted set.
     pub(crate) fn remove_peer_from_trusted_set(&mut self, peer_id: PeerId) {
         self.trusted_peers_resolver.remove(peer_id);
-
-        let Entry::Occupied(mut entry) = self.peers.entry(peer_id) else { return };
-        if !entry.get().is_trusted() {
-            return
-        }
-
-        let peer = entry.get_mut();
-        peer.kind = PeerKind::Basic;
-
         self.trusted_peer_ids.remove(&peer_id);
+        if let Some(peer) = self.peers.get_mut(&peer_id) &&
+            peer.is_trusted()
+        {
+            peer.kind = PeerKind::Basic;
+        }
     }
 
     /// Returns the best idle peer to connect to.
@@ -1341,6 +1337,7 @@ impl BackoffReason {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use alloy_primitives::B512;
     use reth_eth_wire::{
         errors::{EthHandshakeError, EthStreamError, P2PHandshakeError, P2PStreamError},
@@ -1363,7 +1360,6 @@ mod tests {
     };
     use url::Host;
 
-    use super::PeersManager;
     use crate::{
         error::SessionError,
         peers::{
@@ -3309,5 +3305,28 @@ mod tests {
 
         let (best_id, _) = peers.best_unconnected().unwrap();
         assert_eq!(best_id, with_fork, "fork_id should break tie when reputation is equal");
+    }
+
+    #[tokio::test]
+    async fn test_revoke_trust_independent_of_peer_kind() {
+        for kind in [None, Some(PeerKind::Basic), Some(PeerKind::Static), Some(PeerKind::Trusted)] {
+            let mut peers = PeersManager::new(PeersConfig::test());
+            let peer_id = PeerId::random();
+            peers.add_trusted_peer_id(peer_id);
+            if let Some(kind) = kind {
+                peers.add_peer_kind(
+                    peer_id,
+                    Some(kind),
+                    PeerAddr::from_tcp("127.0.0.1:8008".parse().unwrap()),
+                    None,
+                );
+            }
+            peers.remove_peer_from_trusted_set(peer_id);
+            assert!(!peers.trusted_peer_ids.contains(&peer_id));
+            assert_eq!(
+                peers.peers.get(&peer_id).map(|peer| peer.kind),
+                kind.map(|kind| if kind == PeerKind::Trusted { PeerKind::Basic } else { kind })
+            );
+        }
     }
 }

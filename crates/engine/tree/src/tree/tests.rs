@@ -1192,6 +1192,103 @@ async fn test_fcu_with_canonical_ancestor_updates_latest_block() {
     );
 }
 
+/// A persisted canonical rewind must complete before the caller or payload builder can use it.
+#[tokio::test]
+async fn canonical_rewind_waits_for_disk_before_acknowledging_or_building() {
+    for (build_payload, persistence_ok) in
+        [(false, true), (true, true), (false, false), (true, false)]
+    {
+        let chain_spec = MAINNET.clone();
+        let mut block_builder = TestBlockBuilder::eth().with_chain_spec((*chain_spec).clone());
+        let blocks: Vec<_> = block_builder.get_executed_blocks(1..5).collect();
+        let mut harness = TestHarness::new(chain_spec).with_blocks(blocks.clone());
+        harness.tree.engine_kind = EngineApiKind::OpStack;
+        harness.tree.config = harness.tree.config.clone().with_unwind_canonical_header(true);
+        harness.tree.persistence_state.last_persisted_block =
+            blocks[3].recovered_block().num_hash();
+        let canonical_state = harness.tree.canonical_in_memory_state.clone();
+        let old_head = canonical_state.get_canonical_head().num_hash();
+        let ancestor = blocks[1].recovered_block().clone_sealed_header();
+        let ancestor_num_hash = ancestor.num_hash();
+        let (payload_tx, mut payload_rx) = unbounded_channel();
+        harness.tree.payload_builder = PayloadBuilderHandle::new(payload_tx);
+        let (tx, mut rx) = oneshot::channel();
+        let payload_attrs = build_payload.then(|| alloy_rpc_types_engine::PayloadAttributes {
+            timestamp: ancestor.timestamp() + 1,
+            ..Default::default()
+        });
+        let mut tree = harness.tree;
+        let worker = std::thread::spawn(move || {
+            let _ = tree
+                .on_engine_message(FromEngine::Request(
+                    BeaconEngineMessage::ForkchoiceUpdated {
+                        state: ForkchoiceState {
+                            head_block_hash: ancestor_num_hash.hash,
+                            safe_block_hash: B256::ZERO,
+                            finalized_block_hash: B256::ZERO,
+                        },
+                        payload_attrs,
+                        tx,
+                    }
+                    .into(),
+                ))
+                .unwrap();
+            tree
+        });
+
+        // Hold the disk completion acknowledgement. Neither VALID nor a payload job may
+        // escape while the old branch's changeset files are still being truncated.
+        let action = harness
+            .action_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("canonical rewind must request disk removal before acknowledging FCU");
+        let PersistenceAction::RemoveBlocksAbove(number, completion) = action else {
+            panic!("expected disk unwind");
+        };
+        assert_eq!(number, ancestor_num_hash.number);
+        assert!(matches!(rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+        assert!(matches!(
+            payload_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(canonical_state.get_canonical_head().num_hash(), old_head);
+        if persistence_ok {
+            completion
+                .send(PersistenceResult {
+                    last_block: Some(ancestor_num_hash),
+                    commit_duration: None,
+                })
+                .unwrap();
+        } else {
+            drop(completion);
+        }
+
+        let tree = worker.join().unwrap();
+        if !persistence_ok {
+            assert!(rx.await.unwrap().is_err(), "disk failure must not acknowledge the rewind");
+            assert!(matches!(
+                payload_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+            assert_eq!(canonical_state.get_canonical_head().num_hash(), old_head);
+            continue;
+        }
+        assert_eq!(tree.persistence_state.last_persisted_block, ancestor_num_hash);
+        assert!(!tree.persistence_state.in_progress());
+        assert_eq!(canonical_state.get_canonical_head().num_hash(), ancestor_num_hash);
+        let response = rx.await.unwrap().unwrap();
+        if build_payload {
+            let reth_payload_builder::PayloadServiceCommand::BuildNewPayload(_, _, response_tx) =
+                payload_rx.try_recv().unwrap()
+            else {
+                panic!("expected payload build after disk unwind");
+            };
+            response_tx.send(Ok(alloy_rpc_types_engine::PayloadId::new([1; 8]))).unwrap();
+        }
+        assert!(response.await.unwrap().payload_status.is_valid());
+    }
+}
+
 /// Test that verifies the happy path where a new payload extends the canonical chain
 #[test]
 fn test_on_new_payload_canonical_insertion() {

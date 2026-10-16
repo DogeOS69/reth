@@ -950,6 +950,12 @@ where
         let new_head_number = canonical_header.number();
         let new_head_hash = canonical_header.hash();
 
+        if new_head_number < current_head_number {
+            // A save already in flight may still advance the old disk tip. Finish it before
+            // reconstructing the ancestor and deciding which persisted blocks to remove.
+            self.wait_for_pending_persistence().map_err(ProviderError::other)?;
+        }
+
         // Update tree state with the new canonical head
         self.state.tree_state.set_canonical_head(canonical_header.num_hash());
 
@@ -979,7 +985,7 @@ where
     /// Handles chain unwind scenarios by collecting blocks to remove and performing an unwind back
     /// to the canonical header
     fn handle_canonical_chain_unwind(
-        &self,
+        &mut self,
         current_head_number: u64,
         canonical_header: &SealedHeader<N::BlockHeader>,
     ) -> ProviderResult<()> {
@@ -994,9 +1000,19 @@ where
         // Collect blocks that need to be removed from memory
         let old_blocks =
             self.collect_blocks_for_canonical_unwind(new_head_number, current_head_number);
+        let executed_block = self.canonical_block_by_hash(canonical_header.hash())?;
 
-        // Load and apply the canonical ancestor block
-        self.apply_canonical_ancestor_via_reorg(canonical_header, old_blocks)
+        // Do not publish the new head, acknowledge the rewind or start a payload job while
+        // disk still contains the old branch. Historical state providers read its changesets
+        // through mmap; truncating those files underneath a new reader invalidates its reads.
+        if let Some(new_tip_num) = self.find_disk_reorg()? {
+            self.remove_blocks(new_tip_num);
+        }
+        self.wait_for_pending_persistence().map_err(ProviderError::other)?;
+
+        // Publish the ancestor only after the backing disk state is consistent.
+        self.apply_canonical_ancestor_via_reorg(canonical_header, executed_block, old_blocks);
+        Ok(())
     }
 
     /// Collects blocks from memory that need to be removed during an unwind to a canonical block.
@@ -1034,13 +1050,12 @@ where
     fn apply_canonical_ancestor_via_reorg(
         &self,
         canonical_header: &SealedHeader<N::BlockHeader>,
+        executed_block: ExecutedBlock<N>,
         old_blocks: Vec<ExecutedBlock<N>>,
-    ) -> ProviderResult<()> {
+    ) {
         let new_head_hash = canonical_header.hash();
         let new_head_number = canonical_header.number();
 
-        // Load the canonical ancestor's block
-        let executed_block = self.canonical_block_by_hash(new_head_hash)?;
         // Perform the reorg to properly handle the unwind
         self.canonical_in_memory_state
             .update_chain(NewCanonicalChain::Reorg { new: vec![executed_block], old: old_blocks });
@@ -1055,8 +1070,6 @@ where
             block_hash = ?new_head_hash,
             "Successfully loaded canonical ancestor into memory via reorg"
         );
-
-        Ok(())
     }
 
     /// Handles chain advance or same height scenarios.
@@ -1421,6 +1434,16 @@ where
             debug!(target: "engine::tree", count = blocks_to_persist.len(), "persisting remaining blocks before shutdown");
             self.persist_blocks(blocks_to_persist);
         }
+    }
+
+    /// Waits for the active disk operation and any removal triggered by its completion.
+    /// Runs on the engine thread; the persistence service runs on a separate OS thread.
+    fn wait_for_pending_persistence(&mut self) -> Result<(), AdvancePersistenceError> {
+        while let Some((rx, start_time, _action)) = self.persistence_state.rx.take() {
+            let result = rx.recv().map_err(|_| AdvancePersistenceError::ChannelClosed)?;
+            self.on_persistence_complete(result, start_time)?;
+        }
+        Ok(())
     }
 
     /// Tries to poll for a completed persistence task (non-blocking).

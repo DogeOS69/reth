@@ -127,7 +127,7 @@ where
                     }
                     Err(_) => {}
                 };
-                continue
+                continue;
             }
 
             if let EngineReorgState::Reorg { queue } = &mut this.state {
@@ -173,7 +173,7 @@ where
                             return Poll::Ready(Some(BeaconEngineMessage::NewPayload {
                                 payload,
                                 tx,
-                            }))
+                            }));
                         }
                     };
                     let reorg_forkchoice_state = ForkchoiceState {
@@ -205,7 +205,7 @@ where
                         },
                     ]);
                     *this.state = EngineReorgState::Reorg { queue };
-                    continue
+                    continue;
                 }
                 (Some(BeaconEngineMessage::ForkchoiceUpdated { state, payload_attrs, tx }), _) => {
                     // Record last forkchoice state forwarded to the engine.
@@ -217,7 +217,7 @@ where
                 }
                 (item, _) => item,
             };
-            return Poll::Ready(item)
+            return Poll::Ready(item);
         }
     }
 }
@@ -250,7 +250,7 @@ where
                 .block_by_hash(previous_hash)?
                 .ok_or_else(|| ProviderError::HeaderNotFound(previous_hash.into()))?;
             if depth == 0 {
-                break 'target reorg_target.seal_slow()
+                break 'target reorg_target.seal_slow();
             }
 
             depth -= 1;
@@ -271,7 +271,9 @@ where
         .with_bundle_update()
         .build();
 
-    let ctx = evm_config.context_for_block(&reorg_target).map_err(RethError::other)?;
+    let ctx = evm_config
+        .context_for_block_with_parent(&reorg_target, &reorg_target_parent)
+        .map_err(RethError::other)?;
     let evm = evm_config.evm_for_block(&mut state, &reorg_target).map_err(RethError::other)?;
     let mut builder = evm_config.create_block_builder(evm, &reorg_target_parent, ctx);
 
@@ -281,7 +283,7 @@ where
     for tx in candidate_transactions {
         // ensure we still have capacity for this transaction
         if cumulative_gas_used + tx.gas_limit() > reorg_target.gas_limit() {
-            continue
+            continue;
         }
 
         let tx_recovered =
@@ -293,7 +295,7 @@ where
                 error,
             })) => {
                 trace!(target: "engine::stream::reorg", hash = %hash, ?error, "Error executing transaction from next block");
-                continue
+                continue;
             }
             // Treat error as fatal
             Err(error) => return Err(RethError::Execution(error)),

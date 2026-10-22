@@ -217,9 +217,15 @@ where
             Some(parent_header.clone()),
         );
 
-        executor.execute_one(block)?;
+        // The hook exists to explain an invalid block, so a block that fails validation must
+        // still produce a witness: keep the state the attempt touched and report the failure
+        // alongside it rather than instead of it.
+        let outcome = executor.execute_one(block);
         let db = executor.into_state();
         let (codes, preimages, hashed_state, bundle_state) = collect_execution_data(db)?;
+        if let Err(error) = outcome {
+            warn!(target: "engine::invalid_block_hooks::witness", %error, "Re-execution of the invalid block failed; the witness covers the state it reached");
+        }
 
         let state_provider = self.provider.state_by_block_hash(parent_header.hash())?;
         let witness = generate(codes, preimages, hashed_state, state_provider)?;

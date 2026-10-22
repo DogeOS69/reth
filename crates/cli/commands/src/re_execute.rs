@@ -14,8 +14,8 @@ use reth_consensus::FullConsensus;
 use reth_evm::{execute::Executor, ConfigureEvm};
 use reth_primitives_traits::{format_gas_throughput, BlockBody, GotExpected};
 use reth_provider::{
-    BlockNumReader, BlockReader, ChainSpecProvider, DatabaseProviderFactory, ReceiptProvider,
-    StaticFileProviderFactory, TransactionVariant,
+    BlockNumReader, BlockReader, ChainSpecProvider, DatabaseProviderFactory, HeaderProvider,
+    ReceiptProvider, StaticFileProviderFactory, TransactionVariant,
 };
 use reth_revm::database::StateProviderDatabase;
 use reth_stages::stages::calculate_gas_used_from_headers;
@@ -116,6 +116,13 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                 )
             }
         };
+        // Each executor is anchored at a block and then replays the blocks after it in order, so
+        // it is seeded with that block's header: chains whose rules need the parent get it, and
+        // the executor tracks the rest of the run itself.
+        let header_at = {
+            let provider_factory = provider_factory.clone();
+            move |block_number: u64| provider_factory.sealed_header(block_number).unwrap()
+        };
 
         let skip_invalid_blocks = self.skip_invalid_blocks;
         let blocks_per_chunk = self.blocks_per_chunk;
@@ -133,6 +140,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
             let evm_config = components.evm_config().clone();
             let consensus = components.consensus().clone();
             let db_at = db_at.clone();
+            let header_at = header_at.clone();
             let stats_tx = stats_tx.clone();
             let info_tx = info_tx.clone();
             let cancellation = cancellation.clone();
@@ -153,7 +161,8 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                     }
                     let chunk_end = (chunk_start + blocks_per_chunk).min(max_block);
 
-                    let mut executor = evm_config.batch_executor(db_at(chunk_start - 1));
+                    let mut executor = evm_config
+                        .executor_with_parent(db_at(chunk_start - 1), header_at(chunk_start - 1));
                     let mut executor_created = Instant::now();
 
                     'blocks: for block in chunk_start..chunk_end {
@@ -169,8 +178,10 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                             Ok(result) => result,
                             Err(err) => {
                                 if skip_invalid_blocks {
-                                    executor =
-                                        evm_config.batch_executor(db_at(block.number()));
+                                    executor = evm_config.executor_with_parent(
+                                        db_at(block.number()),
+                                        header_at(block.number()),
+                                    );
                                     let _ =
                                         info_tx.send((block, eyre::Report::new(err)));
                                     continue
@@ -228,8 +239,10 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
 
                                         error!(number=?block.number(), ?mismatch, "Gas usage mismatch");
                                         if skip_invalid_blocks {
-                                            executor = evm_config
-                                                .batch_executor(db_at(block.number()));
+                                            executor = evm_config.executor_with_parent(
+                                                db_at(block.number()),
+                                                header_at(block.number()),
+                                            );
                                             let _ = info_tx.send((block, err));
                                             continue 'blocks;
                                         }
@@ -248,8 +261,10 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                         if executor.size_hint() > 1_000_000 ||
                             executor_created.elapsed() > executor_lifetime
                         {
-                            executor =
-                                evm_config.batch_executor(db_at(block.number()));
+                            executor = evm_config.executor_with_parent(
+                                db_at(block.number()),
+                                header_at(block.number()),
+                            );
                             executor_created = Instant::now();
                         }
                     }

@@ -41,13 +41,15 @@ pub struct BackfillJob<E, P> {
 impl<E, P> Iterator for BackfillJob<E, P>
 where
     E: ConfigureEvm<Primitives: NodePrimitives<Block = P::Block>> + 'static,
-    P: HeaderProvider + BlockReader<Transaction: SignedTransaction> + StateProviderFactory,
+    P: HeaderProvider<Header = <E::Primitives as NodePrimitives>::BlockHeader>
+        + BlockReader<Transaction: SignedTransaction>
+        + StateProviderFactory,
 {
     type Item = BackfillJobResult<Chain<E::Primitives>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.range.is_empty() {
-            return None
+            return None;
         }
 
         Some(self.execute_range())
@@ -57,7 +59,9 @@ where
 impl<E, P> BackfillJob<E, P>
 where
     E: ConfigureEvm<Primitives: NodePrimitives<Block = P::Block>> + 'static,
-    P: BlockReader<Transaction: SignedTransaction> + HeaderProvider + StateProviderFactory,
+    P: BlockReader<Transaction: SignedTransaction>
+        + HeaderProvider<Header = <E::Primitives as NodePrimitives>::BlockHeader>
+        + StateProviderFactory,
 {
     /// Converts the backfill job into a single block backfill job.
     pub fn into_single_blocks(self) -> SingleBlockBackfillJob<E, P> {
@@ -76,11 +80,17 @@ where
             "Executing block range"
         );
 
-        let mut executor = self.evm_config.batch_executor(StateProviderDatabase::new(
-            self.provider
-                .history_by_block_number(self.range.start().saturating_sub(1))
-                .map_err(BlockExecutionError::other)?,
-        ));
+        // The range is contiguous, so only its first block needs a parent from outside; the
+        // executor tracks the rest itself.
+        let parent_number = self.range.start().saturating_sub(1);
+        let mut executor = self.evm_config.executor_with_parent(
+            StateProviderDatabase::new(
+                self.provider
+                    .history_by_block_number(parent_number)
+                    .map_err(BlockExecutionError::other)?,
+            ),
+            self.provider.sealed_header(parent_number).map_err(BlockExecutionError::other)?,
+        );
 
         let mut fetch_block_duration = Duration::default();
         let mut execution_duration = Duration::default();
@@ -128,7 +138,7 @@ where
                 cumulative_gas,
                 batch_start.elapsed(),
             ) {
-                break
+                break;
             }
         }
 
@@ -169,7 +179,9 @@ pub struct SingleBlockBackfillJob<E, P> {
 impl<E, P> Iterator for SingleBlockBackfillJob<E, P>
 where
     E: ConfigureEvm<Primitives: NodePrimitives<Block = P::Block>> + 'static,
-    P: HeaderProvider + BlockReader + StateProviderFactory,
+    P: HeaderProvider<Header = <E::Primitives as NodePrimitives>::BlockHeader>
+        + BlockReader
+        + StateProviderFactory,
 {
     type Item = BackfillJobResult<(
         RecoveredBlock<P::Block>,
@@ -184,7 +196,9 @@ where
 impl<E, P> SingleBlockBackfillJob<E, P>
 where
     E: ConfigureEvm<Primitives: NodePrimitives<Block = P::Block>> + 'static,
-    P: HeaderProvider + BlockReader + StateProviderFactory,
+    P: HeaderProvider<Header = <E::Primitives as NodePrimitives>::BlockHeader>
+        + BlockReader
+        + StateProviderFactory,
 {
     /// Converts the single block backfill job into a stream.
     pub fn into_stream(
@@ -214,11 +228,15 @@ where
             .map_err(BlockExecutionError::other)?;
 
         // Configure the executor to use the previous block's state.
-        let executor = self.evm_config.batch_executor(StateProviderDatabase::new(
-            self.provider
-                .history_by_block_number(block_number.saturating_sub(1))
-                .map_err(BlockExecutionError::other)?,
-        ));
+        let parent_number = block_number.saturating_sub(1);
+        let executor = self.evm_config.executor_with_parent(
+            StateProviderDatabase::new(
+                self.provider
+                    .history_by_block_number(parent_number)
+                    .map_err(BlockExecutionError::other)?,
+            ),
+            self.provider.sealed_header(parent_number).map_err(BlockExecutionError::other)?,
+        );
 
         trace!(target: "exex::backfill", number = block_number, txs = block_with_senders.body().transaction_count(), "Executing block");
 

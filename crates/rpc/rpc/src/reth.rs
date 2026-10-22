@@ -85,7 +85,7 @@ where
 
     fn try_balance_changes_in_block(&self, block_id: BlockId) -> EthResult<AddressMap<U256>> {
         let Some(block_number) = self.provider().block_number_for_id(block_id)? else {
-            return Err(EthApiError::HeaderNotFound(block_id))
+            return Err(EthApiError::HeaderNotFound(block_id));
         };
 
         let state = self.provider().state_by_block_id(block_id)?;
@@ -108,7 +108,7 @@ where
 impl<N, Provider, EvmConfig> RethApi<Provider, EvmConfig>
 where
     N: NodePrimitives,
-    Provider: BlockReaderIdExt
+    Provider: BlockReaderIdExt<Header = N::BlockHeader>
         + ChangeSetReader
         + StateProviderFactory
         + BlockReader<Block = N::Block>
@@ -128,7 +128,7 @@ where
         if block_count == 0 || block_count > MAX_BLOCK_COUNT {
             return Err(EthApiError::InvalidParams(format!(
                 "block count must be between 1 and {MAX_BLOCK_COUNT}, got {block_count}"
-            )))
+            )));
         }
 
         let permit = self
@@ -151,11 +151,11 @@ where
         block_count: u64,
     ) -> EthResult<Option<ExecutionOutcome<N::Receipt>>> {
         let Some(start_block) = self.provider().block_number_for_id(block_id)? else {
-            return Ok(None)
+            return Ok(None);
         };
 
         if start_block == 0 {
-            return Ok(Some(ExecutionOutcome::default()))
+            return Ok(Some(ExecutionOutcome::default()));
         }
 
         let state_provider = self.provider().history_by_block_number(start_block - 1)?;
@@ -168,18 +168,23 @@ where
                 .recovered_block(block_number.into(), TransactionVariant::WithHash)?
             else {
                 if block_number == start_block {
-                    return Ok(None)
+                    return Ok(None);
                 }
                 break;
             };
             blocks.push(block);
         }
 
-        let outcome = self.evm_config().executor(db).execute_batch(&blocks).map_err(
-            |e: reth_evm::execute::BlockExecutionError| {
-                EthApiError::Internal(reth_errors::RethError::Other(e.into()))
-            },
-        )?;
+        // The range is contiguous and executed to completion, so seed the parent of its first
+        // block; the executor tracks the rest itself.
+        let parent = self.provider().sealed_header(start_block - 1)?;
+
+        let outcome =
+            self.evm_config().executor_with_parent(db, parent).execute_batch(&blocks).map_err(
+                |e: reth_evm::execute::BlockExecutionError| {
+                    EthApiError::Internal(reth_errors::RethError::Other(e.into()))
+                },
+            )?;
 
         Ok(Some(outcome))
     }
@@ -188,7 +193,7 @@ where
 #[async_trait]
 impl<Provider, EvmConfig> RethApiServer for RethApi<Provider, EvmConfig>
 where
-    Provider: BlockReaderIdExt
+    Provider: BlockReaderIdExt<Header = <Provider::Primitives as NodePrimitives>::BlockHeader>
         + ChangeSetReader
         + StateProviderFactory
         + BlockReader<Block = <Provider::Primitives as NodePrimitives>::Block>

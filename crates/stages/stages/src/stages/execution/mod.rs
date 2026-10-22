@@ -303,7 +303,13 @@ where
         self.ensure_consistency(provider, input.checkpoint().block_number, None)?;
 
         let db = StateProviderDatabase(LatestStateProviderRef::new(provider));
-        let mut executor = self.evm_config.batch_executor(db);
+        // Chains whose execution context depends on the parent header need the parent of the
+        // first block in the range; the executor tracks it itself from there on.
+        let parent = match start_block.checked_sub(1) {
+            Some(parent_number) => provider.sealed_header(parent_number)?,
+            None => None,
+        };
+        let mut executor = self.evm_config.executor_with_parent(db, parent);
 
         // Progress tracking
         let mut stage_progress = start_block;

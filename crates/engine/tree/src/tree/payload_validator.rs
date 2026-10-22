@@ -310,17 +310,26 @@ where
     }
 
     /// Returns a [`ExecutionCtxFor`] for the given payload or block.
+    ///
+    /// `parent` is the sealed header the block builds on, which this validator has already
+    /// resolved (from the in-memory tree or from the provider). Chains whose execution context
+    /// depends on the parent header need it; the rest ignore it.
     pub fn execution_ctx_for<'a, T: PayloadTypes<BuiltPayload: BuiltPayload<Primitives = N>>>(
         &self,
         input: &'a BlockOrPayload<T>,
+        parent: &SealedHeader<N::BlockHeader>,
     ) -> Result<ExecutionCtxFor<'a, Evm>, Evm::Error>
     where
         V: PayloadValidator<T, Block = N::Block>,
         Evm: ConfigureEngineEvm<T::ExecutionData, Primitives = N>,
     {
         match input {
-            BlockOrPayload::Payload(payload) => Ok(self.evm_config.context_for_payload(payload)?),
-            BlockOrPayload::Block(block) => Ok(self.evm_config.context_for_block(block)?),
+            BlockOrPayload::Payload(payload) => {
+                Ok(self.evm_config.context_for_payload_with_parent(payload, parent)?)
+            }
+            BlockOrPayload::Block(block) => {
+                Ok(self.evm_config.context_for_block_with_parent(block, parent)?)
+            }
         }
     }
 
@@ -566,7 +575,7 @@ where
         // as transactions complete, allowing parallel computation during execution.
         let execute_block_start = Instant::now();
         let (output, senders, receipt_root_rx) =
-            match self.execute_block(state_provider, env, &input, &mut handle) {
+            match self.execute_block(state_provider, env, &input, &parent_block, &mut handle) {
                 Ok(output) => output,
                 Err(err) => return self.handle_execution_error(input, err, &parent_block),
             };
@@ -889,6 +898,7 @@ where
         state_provider: S,
         env: ExecutionEnv<Evm>,
         input: &BlockOrPayload<T>,
+        parent: &SealedHeader<N::BlockHeader>,
         handle: &mut PayloadHandle<impl ExecutableTxFor<Evm>, Err, N::Receipt>,
     ) -> Result<
         (
@@ -919,7 +929,7 @@ where
             let spec_id = *env.evm_env.spec_id();
             let evm = self.evm_config.evm_with_env(&mut db, env.evm_env);
             let ctx = self
-                .execution_ctx_for(input)
+                .execution_ctx_for(input, parent)
                 .map_err(|e| InsertBlockErrorKind::Other(Box::new(e)))?;
             let executor = self.evm_config.create_executor(evm, ctx);
             (spec_id, executor)

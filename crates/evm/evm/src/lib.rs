@@ -245,6 +245,22 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
         block: &'a SealedBlock<BlockTy<Self::Primitives>>,
     ) -> Result<ExecutionCtxFor<'a, Self>, Self::Error>;
 
+    /// Returns the configured [`BlockExecutorFactory::ExecutionCtx`] for a given block, together
+    /// with the sealed header of its parent.
+    ///
+    /// Chains whose block validity depends on the parent header *and* on the parent's post-state
+    /// — a state-dependent base-fee rule, for example — cannot reconstruct the parent from the
+    /// block alone, so callers that already hold it pass it here. The default ignores the parent
+    /// and falls back to [`ConfigureEvm::context_for_block`], so existing implementations keep
+    /// working unchanged.
+    fn context_for_block_with_parent<'a>(
+        &self,
+        block: &'a SealedBlock<BlockTy<Self::Primitives>>,
+        _parent: &SealedHeader<HeaderTy<Self::Primitives>>,
+    ) -> Result<ExecutionCtxFor<'a, Self>, Self::Error> {
+        self.context_for_block(block)
+    }
+
     /// Returns the configured [`BlockExecutorFactory::ExecutionCtx`] for `parent + 1`
     /// block.
     fn context_for_next_block(
@@ -328,6 +344,22 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
     {
         let evm = self.evm_for_block(db, block.header())?;
         let ctx = self.context_for_block(block)?;
+        Ok(self.create_executor(evm, ctx))
+    }
+
+    /// Creates a strategy for execution of a given block, with the sealed header of its parent.
+    ///
+    /// Same as [`ConfigureEvm::executor_for_block`], but routed through
+    /// [`ConfigureEvm::context_for_block_with_parent`].
+    fn executor_for_block_with_parent<'a, DB: Database>(
+        &'a self,
+        db: &'a mut State<DB>,
+        block: &'a SealedBlock<<Self::Primitives as NodePrimitives>::Block>,
+        parent: &SealedHeader<HeaderTy<Self::Primitives>>,
+    ) -> Result<impl BlockExecutorFor<'a, Self::BlockExecutorFactory, &'a mut State<DB>>, Self::Error>
+    {
+        let evm = self.evm_for_block(db, block.header())?;
+        let ctx = self.context_for_block_with_parent(block, parent)?;
         Ok(self.create_executor(evm, ctx))
     }
 
@@ -450,6 +482,22 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
         db: DB,
     ) -> impl Executor<DB, Primitives = Self::Primitives, Error = BlockExecutionError> {
         BasicBlockExecutor::new(self, db)
+    }
+
+    /// Returns a new [`BasicBlockExecutor`] that knows the parent of the first block it will
+    /// execute.
+    ///
+    /// Needed by chains whose execution context depends on the parent header (see
+    /// [`ConfigureEvm::context_for_block_with_parent`]). Within a contiguous range the executor
+    /// tracks the parent itself, so only the first block has to be seeded. `None` means the
+    /// caller has no parent to offer, which is the same as [`ConfigureEvm::batch_executor`].
+    #[auto_impl(keep_default_for(&, Arc))]
+    fn executor_with_parent<DB: Database>(
+        &self,
+        db: DB,
+        parent: Option<SealedHeader<HeaderTy<Self::Primitives>>>,
+    ) -> impl Executor<DB, Primitives = Self::Primitives, Error = BlockExecutionError> {
+        BasicBlockExecutor::new(self, db).with_parent(parent)
     }
 }
 

@@ -534,10 +534,17 @@ where
     ) -> Result<ExecutionWitness, Eth::Error> {
         let block_number = block.header().number();
 
+        // The base-fee rule of some chains is state-dependent, so re-execution has to be given
+        // the same parent header the importer had.
+        let parent = self
+            .provider()
+            .sealed_header_by_hash(block.parent_hash())
+            .map_err(EthApiError::from)?;
+
         let (mut exec_witness, lowest_block_number) = self
             .eth_api()
             .spawn_with_state_at_block(block.parent_hash(), move |eth_api, mut db| {
-                let block_executor = eth_api.evm_config().executor(&mut db);
+                let block_executor = eth_api.evm_config().executor_with_parent(&mut db, parent);
 
                 let mut witness_record = ExecutionWitnessRecord::default();
 

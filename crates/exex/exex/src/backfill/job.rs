@@ -49,7 +49,7 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.range.is_empty() {
-            return None;
+            return None
         }
 
         Some(self.execute_range())
@@ -138,7 +138,7 @@ where
                 cumulative_gas,
                 batch_start.elapsed(),
             ) {
-                break;
+                break
             }
         }
 

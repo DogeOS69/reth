@@ -121,7 +121,11 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
         // the executor tracks the rest of the run itself.
         let header_at = {
             let provider_factory = provider_factory.clone();
-            move |block_number: u64| provider_factory.sealed_header(block_number).unwrap()
+            move |block_number: u64| {
+                provider_factory
+                    .sealed_header(block_number)
+                    .map_err(eyre::Report::from)
+            }
         };
 
         let skip_invalid_blocks = self.skip_invalid_blocks;
@@ -162,7 +166,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                     let chunk_end = (chunk_start + blocks_per_chunk).min(max_block);
 
                     let mut executor = evm_config
-                        .executor_with_parent(db_at(chunk_start - 1), header_at(chunk_start - 1));
+                        .executor_with_parent(db_at(chunk_start - 1), header_at(chunk_start - 1)?);
                     let mut executor_created = Instant::now();
 
                     'blocks: for block in chunk_start..chunk_end {
@@ -180,7 +184,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                                 if skip_invalid_blocks {
                                     executor = evm_config.executor_with_parent(
                                         db_at(block.number()),
-                                        header_at(block.number()),
+                                        header_at(block.number())?,
                                     );
                                     let _ =
                                         info_tx.send((block, eyre::Report::new(err)));
@@ -241,7 +245,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                                         if skip_invalid_blocks {
                                             executor = evm_config.executor_with_parent(
                                                 db_at(block.number()),
-                                                header_at(block.number()),
+                                                header_at(block.number())?,
                                             );
                                             let _ = info_tx.send((block, err));
                                             continue 'blocks;
@@ -263,7 +267,7 @@ impl<C: ChainSpecParser<ChainSpec: EthChainSpec + Hardforks + EthereumHardforks>
                         {
                             executor = evm_config.executor_with_parent(
                                 db_at(block.number()),
-                                header_at(block.number()),
+                                header_at(block.number())?,
                             );
                             executor_created = Instant::now();
                         }

@@ -245,6 +245,21 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
         block: &'a SealedBlock<BlockTy<Self::Primitives>>,
     ) -> Result<ExecutionCtxFor<'a, Self>, Self::Error>;
 
+    /// Validates state-dependent rules before importing a block, before any state changes.
+    ///
+    /// Engine import and staged sync provide the resolved parent and the child's pre-state.
+    /// Ordinary replay, simulation and block building do not call this hook. Implementations
+    /// may read/cache state but must not change it. The default imposes no additional rules.
+    fn validate_block_pre_execution<DB: Database>(
+        &self,
+        _db: &mut DB,
+        _env: &EvmEnvFor<Self>,
+        _parent_hash: B256,
+        _parent: &SealedHeader<HeaderTy<Self::Primitives>>,
+    ) -> Result<(), BlockExecutionError> {
+        Ok(())
+    }
+
     /// Returns the configured [`BlockExecutorFactory::ExecutionCtx`] for `parent + 1`
     /// block.
     fn context_for_next_block(

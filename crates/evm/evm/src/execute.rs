@@ -40,6 +40,18 @@ pub trait Executor<DB: Database>: Sized {
         block: &RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>,
     ) -> Result<BlockExecutionResult<<Self::Primitives as NodePrimitives>::Receipt>, Self::Error>;
 
+    /// Runs state-dependent import checks against the executor's current pre-state.
+    ///
+    /// Importers call this before [`Self::execute_one`], in addition to consensus checks.
+    /// Executors with state-dependent rules must override the default no-op.
+    fn validate_block_pre_execution(
+        &mut self,
+        _block: &RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>,
+        _parent: &SealedHeader<HeaderTy<Self::Primitives>>,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     /// Executes the EVM with the given input and accepts a state hook closure that is invoked with
     /// the EVM state after execution.
     fn execute_one_with_state_hook<F>(
@@ -555,6 +567,21 @@ where
 {
     type Primitives = F::Primitives;
     type Error = BlockExecutionError;
+
+    fn validate_block_pre_execution(
+        &mut self,
+        block: &RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>,
+        parent: &SealedHeader<HeaderTy<Self::Primitives>>,
+    ) -> Result<(), Self::Error> {
+        let env =
+            self.strategy_factory.evm_env(block.header()).map_err(BlockExecutionError::other)?;
+        self.strategy_factory.validate_block_pre_execution(
+            &mut self.db,
+            &env,
+            block.parent_hash(),
+            parent,
+        )
+    }
 
     fn execute_one(
         &mut self,

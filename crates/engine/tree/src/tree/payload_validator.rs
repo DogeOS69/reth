@@ -566,7 +566,7 @@ where
         // as transactions complete, allowing parallel computation during execution.
         let execute_block_start = Instant::now();
         let (output, senders, receipt_root_rx) =
-            match self.execute_block(state_provider, env, &input, &mut handle) {
+            match self.execute_block(state_provider, env, &input, &parent_block, &mut handle) {
                 Ok(output) => output,
                 Err(err) => return self.handle_execution_error(input, err, &parent_block),
             };
@@ -889,6 +889,7 @@ where
         state_provider: S,
         env: ExecutionEnv<Evm>,
         input: &BlockOrPayload<T>,
+        parent: &SealedHeader<N::BlockHeader>,
         handle: &mut PayloadHandle<impl ExecutableTxFor<Evm>, Err, N::Receipt>,
     ) -> Result<
         (
@@ -913,6 +914,13 @@ where
                 .with_bundle_update()
                 .build()
         });
+
+        self.evm_config.validate_block_pre_execution(
+            &mut db,
+            &env.evm_env,
+            input.parent_hash(),
+            parent,
+        )?;
 
         let (spec_id, mut executor) = {
             let _span = debug_span!(target: "engine::tree", "create_evm").entered();

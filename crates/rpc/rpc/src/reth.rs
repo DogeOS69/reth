@@ -108,7 +108,7 @@ where
 impl<N, Provider, EvmConfig> RethApi<Provider, EvmConfig>
 where
     N: NodePrimitives,
-    Provider: BlockReaderIdExt<Header = N::BlockHeader>
+    Provider: BlockReaderIdExt
         + ChangeSetReader
         + StateProviderFactory
         + BlockReader<Block = N::Block>
@@ -175,16 +175,11 @@ where
             blocks.push(block);
         }
 
-        // The range is contiguous and executed to completion, so seed the parent of its first
-        // block; the executor tracks the rest itself.
-        let parent = self.provider().sealed_header(start_block - 1)?;
-
-        let outcome =
-            self.evm_config().executor_with_parent(db, parent).execute_batch(&blocks).map_err(
-                |e: reth_evm::execute::BlockExecutionError| {
-                    EthApiError::Internal(reth_errors::RethError::Other(e.into()))
-                },
-            )?;
+        let outcome = self.evm_config().executor(db).execute_batch(&blocks).map_err(
+            |e: reth_evm::execute::BlockExecutionError| {
+                EthApiError::Internal(reth_errors::RethError::Other(e.into()))
+            },
+        )?;
 
         Ok(Some(outcome))
     }
@@ -193,7 +188,7 @@ where
 #[async_trait]
 impl<Provider, EvmConfig> RethApiServer for RethApi<Provider, EvmConfig>
 where
-    Provider: BlockReaderIdExt<Header = <Provider::Primitives as NodePrimitives>::BlockHeader>
+    Provider: BlockReaderIdExt
         + ChangeSetReader
         + StateProviderFactory
         + BlockReader<Block = <Provider::Primitives as NodePrimitives>::Block>

@@ -303,13 +303,11 @@ where
         self.ensure_consistency(provider, input.checkpoint().block_number, None)?;
 
         let db = StateProviderDatabase(LatestStateProviderRef::new(provider));
-        // Chains whose execution context depends on the parent header need the parent of the
-        // first block in the range; the executor tracks it itself from there on.
-        let parent = match start_block.checked_sub(1) {
-            Some(parent_number) => provider.sealed_header(parent_number)?,
-            None => None,
-        };
-        let mut executor = self.evm_config.executor_with_parent(db, parent);
+        let mut executor = self.evm_config.batch_executor(db);
+        let parent_number = start_block.saturating_sub(1);
+        let mut parent = provider
+            .sealed_header(parent_number)?
+            .ok_or_else(|| ProviderError::HeaderNotFound(parent_number.into()))?;
 
         // Progress tracking
         let mut stage_progress = start_block;
@@ -357,10 +355,13 @@ where
             let execute_start = Instant::now();
 
             let result = self.metrics.metered_one(&block, |input| {
-                executor.execute_one(input).map_err(|error| StageError::Block {
-                    block: Box::new(block.block_with_parent()),
-                    error: BlockErrorKind::Execution(error),
-                })
+                executor
+                    .validate_block_pre_execution(input, &parent)
+                    .and_then(|()| executor.execute_one(input))
+                    .map_err(|error| StageError::Block {
+                        block: Box::new(block.block_with_parent()),
+                        error: BlockErrorKind::Execution(error),
+                    })
             })?;
 
             if let Err(err) = self.consensus.validate_block_post_execution(&block, &result, None) {
@@ -370,6 +371,7 @@ where
                 })
             }
             results.push(result);
+            parent = block.clone_sealed_header();
 
             execution_duration += execute_start.elapsed();
 

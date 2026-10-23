@@ -19,7 +19,7 @@ use reth_evm::{
 use reth_evm_ethereum::EthEvmConfig;
 use reth_execution_types::BlockExecutionResult;
 use reth_primitives_traits::{
-    crypto::secp256k1::public_key_to_address, Block as _, RecoveredBlock, SealedHeader,
+    crypto::secp256k1::public_key_to_address, Block as _, RecoveredBlock,
 };
 use reth_testing_utils::generators::{self, sign_tx_with_key_pair};
 use revm::{
@@ -828,52 +828,4 @@ fn test_balance_increment_not_duplicated() {
             "Final balance should match expected value after withdrawal"
         );
     }
-}
-
-/// Seeding the executor with a parent must not change what a chain that ignores the parent
-/// does: `context_for_block_with_parent` defaults to `context_for_block`, so every existing
-/// implementation keeps its behaviour. The seed is also tracked across a contiguous range, and
-/// `execute_one_with_state_hook` takes the same path as `execute_one`.
-#[test]
-fn seeding_a_parent_does_not_change_execution() {
-    let chain_spec =
-        Arc::new(ChainSpecBuilder::from(&*MAINNET).shanghai_activated().paris_activated().build());
-    let provider = EthEvmConfig::new(chain_spec);
-
-    let parent = SealedHeader::seal_slow(Header {
-        number: 0,
-        gas_limit: 1_000_000,
-        base_fee_per_gas: Some(u64::from(ETH_TO_WEI as u32)),
-        ..Header::default()
-    });
-    let block = |number: u64, parent_hash: B256| {
-        Block {
-            header: Header {
-                number,
-                parent_hash,
-                timestamp: number,
-                gas_limit: 1_000_000,
-                ..Header::default()
-            },
-            body: BlockBody::default(),
-        }
-        .try_into_recovered()
-        .unwrap()
-    };
-    let first = block(1, parent.hash());
-    let second = block(2, first.hash());
-
-    let mut seeded =
-        provider.executor_with_parent(CacheDB::<EmptyDB>::default(), Some(parent.clone()));
-    let mut plain = provider.batch_executor(CacheDB::<EmptyDB>::default());
-    for b in [&first, &second] {
-        assert_eq!(seeded.execute_one(b).unwrap().gas_used, plain.execute_one(b).unwrap().gas_used);
-    }
-
-    // The state-hook variant goes through the same parent handling.
-    let mut seeded = provider.executor_with_parent(CacheDB::<EmptyDB>::default(), Some(parent));
-    seeded.execute_one_with_state_hook(&first, |_, _: &_| {}).unwrap();
-    // A gap in the range drops the tracked parent instead of reusing a stale one.
-    let unrelated = block(9, B256::repeat_byte(0xaa));
-    seeded.execute_one(&unrelated).unwrap();
 }

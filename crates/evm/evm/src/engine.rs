@@ -2,7 +2,7 @@ use crate::{execute::ExecutableTxFor, ConfigureEvm, EvmEnvFor, ExecutionCtxFor, 
 use alloy_consensus::transaction::Either;
 use alloy_evm::{block::ExecutableTxParts, RecoveredTx};
 use rayon::prelude::*;
-use reth_primitives_traits::{HeaderTy, SealedHeader, TxTy};
+use reth_primitives_traits::TxTy;
 
 /// [`ConfigureEvm`] extension providing methods for executing payloads.
 pub trait ConfigureEngineEvm<ExecutionData>: ConfigureEvm {
@@ -14,20 +14,6 @@ pub trait ConfigureEngineEvm<ExecutionData>: ConfigureEvm {
         &self,
         payload: &'a ExecutionData,
     ) -> Result<ExecutionCtxFor<'a, Self>, Self::Error>;
-
-    /// Returns an [`ExecutionCtxFor`] for the given payload, together with the sealed header of
-    /// its parent.
-    ///
-    /// The payload-side counterpart of [`ConfigureEvm::context_for_block_with_parent`]; the
-    /// default ignores the parent and falls back to
-    /// [`ConfigureEngineEvm::context_for_payload`].
-    fn context_for_payload_with_parent<'a>(
-        &self,
-        payload: &'a ExecutionData,
-        _parent: &SealedHeader<HeaderTy<Self::Primitives>>,
-    ) -> Result<ExecutionCtxFor<'a, Self>, Self::Error> {
-        self.context_for_payload(payload)
-    }
 
     /// Returns an [`ExecutableTxIterator`] for the given payload.
     fn tx_iterator_for_payload(

@@ -40,6 +40,18 @@ pub trait Executor<DB: Database>: Sized {
         block: &RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>,
     ) -> Result<BlockExecutionResult<<Self::Primitives as NodePrimitives>::Receipt>, Self::Error>;
 
+    /// Runs state-dependent import checks against the executor's current pre-state.
+    ///
+    /// Importers call this before [`Self::execute_one`], in addition to consensus checks.
+    /// Executors with state-dependent rules must override the default no-op.
+    fn validate_block_pre_execution(
+        &mut self,
+        _block: &RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>,
+        _parent: &SealedHeader<HeaderTy<Self::Primitives>>,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     /// Executes the EVM with the given input and accepts a state hook closure that is invoked with
     /// the EVM state after execution.
     fn execute_one_with_state_hook<F>(
@@ -533,65 +545,22 @@ where
 /// A generic block executor that uses a [`BlockExecutor`] to
 /// execute blocks.
 #[expect(missing_debug_implementations)]
-pub struct BasicBlockExecutor<F, DB, H = alloy_consensus::Header> {
+pub struct BasicBlockExecutor<F, DB> {
     /// Block execution strategy.
     pub(crate) strategy_factory: F,
     /// Database.
     pub(crate) db: State<DB>,
-    /// Sealed header of the block executed just before the next one, when known.
-    ///
-    /// Blocks are executed in order, so after the first block this is simply the previous
-    /// block's header. Chains whose execution context needs the parent header (see
-    /// [`ConfigureEvm::context_for_block_with_parent`]) get it from here; the first block of a
-    /// range has no predecessor, so callers seed it with
-    /// [`BasicBlockExecutor::with_parent`].
-    pub(crate) parent: Option<SealedHeader<H>>,
 }
 
-impl<F, DB: Database, H> BasicBlockExecutor<F, DB, H> {
+impl<F, DB: Database> BasicBlockExecutor<F, DB> {
     /// Creates a new `BasicBlockExecutor` with the given strategy.
     pub fn new(strategy_factory: F, db: DB) -> Self {
         let db = State::builder().with_database(db).with_bundle_update().build();
-        Self { strategy_factory, db, parent: None }
-    }
-
-    /// Seeds the parent of the first block this executor will execute.
-    ///
-    /// Only needed by chains whose execution context depends on the parent header; for the
-    /// second and later blocks of a range the executor tracks the parent itself.
-    pub fn with_parent(mut self, parent: Option<SealedHeader<H>>) -> Self {
-        self.parent = parent;
-        self
+        Self { strategy_factory, db }
     }
 }
 
-impl<F, DB> BasicBlockExecutor<F, DB, HeaderTy<F::Primitives>>
-where
-    F: ConfigureEvm,
-    DB: Database,
-{
-    /// Splits the executor into the pieces `execute_one` needs at once: the strategy, the
-    /// database, and the tracked parent of `block` if it is in fact its parent.
-    ///
-    /// A hash mismatch means the caller did not execute a contiguous range, so the parent is
-    /// not known and the execution context is built without it.
-    fn split_for(
-        &mut self,
-        block: &RecoveredBlock<<F::Primitives as NodePrimitives>::Block>,
-    ) -> (&F, &mut State<DB>, Option<&SealedHeader<HeaderTy<F::Primitives>>>) {
-        let Self { strategy_factory, db, parent } = self;
-        let parent =
-            parent.as_ref().filter(|parent| parent.hash() == block.header().parent_hash());
-        (strategy_factory, db, parent)
-    }
-
-    /// Records `block` as the parent of whatever is executed next.
-    fn track_parent(&mut self, block: &RecoveredBlock<<F::Primitives as NodePrimitives>::Block>) {
-        self.parent = Some(block.clone_sealed_header());
-    }
-}
-
-impl<F, DB> Executor<DB> for BasicBlockExecutor<F, DB, HeaderTy<F::Primitives>>
+impl<F, DB> Executor<DB> for BasicBlockExecutor<F, DB>
 where
     F: ConfigureEvm,
     DB: Database,
@@ -599,25 +568,33 @@ where
     type Primitives = F::Primitives;
     type Error = BlockExecutionError;
 
+    fn validate_block_pre_execution(
+        &mut self,
+        block: &RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>,
+        parent: &SealedHeader<HeaderTy<Self::Primitives>>,
+    ) -> Result<(), Self::Error> {
+        let env =
+            self.strategy_factory.evm_env(block.header()).map_err(BlockExecutionError::other)?;
+        self.strategy_factory.validate_block_pre_execution(
+            &mut self.db,
+            &env,
+            block.parent_hash(),
+            parent,
+        )
+    }
+
     fn execute_one(
         &mut self,
         block: &RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>,
     ) -> Result<BlockExecutionResult<<Self::Primitives as NodePrimitives>::Receipt>, Self::Error>
     {
-        let (strategy_factory, db, parent) = self.split_for(block);
-        let result = match parent {
-            Some(parent) => strategy_factory
-                .executor_for_block_with_parent(db, block, parent)
-                .map_err(BlockExecutionError::other)?
-                .execute_block(block.transactions_recovered())?,
-            None => strategy_factory
-                .executor_for_block(db, block)
-                .map_err(BlockExecutionError::other)?
-                .execute_block(block.transactions_recovered())?,
-        };
+        let result = self
+            .strategy_factory
+            .executor_for_block(&mut self.db, block)
+            .map_err(BlockExecutionError::other)?
+            .execute_block(block.transactions_recovered())?;
 
         self.db.merge_transitions(BundleRetention::Reverts);
-        self.track_parent(block);
 
         Ok(result)
     }
@@ -630,23 +607,14 @@ where
     where
         H: OnStateHook + 'static,
     {
-        let hook = Some(Box::new(state_hook) as Box<dyn OnStateHook>);
-        let (strategy_factory, db, parent) = self.split_for(block);
-        let result = match parent {
-            Some(parent) => strategy_factory
-                .executor_for_block_with_parent(db, block, parent)
-                .map_err(BlockExecutionError::other)?
-                .with_state_hook(hook)
-                .execute_block(block.transactions_recovered())?,
-            None => strategy_factory
-                .executor_for_block(db, block)
-                .map_err(BlockExecutionError::other)?
-                .with_state_hook(hook)
-                .execute_block(block.transactions_recovered())?,
-        };
+        let result = self
+            .strategy_factory
+            .executor_for_block(&mut self.db, block)
+            .map_err(BlockExecutionError::other)?
+            .with_state_hook(Some(Box::new(state_hook)))
+            .execute_block(block.transactions_recovered())?;
 
         self.db.merge_transitions(BundleRetention::Reverts);
-        self.track_parent(block);
 
         Ok(result)
     }

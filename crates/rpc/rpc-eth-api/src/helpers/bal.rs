@@ -8,7 +8,7 @@ use reth_revm::{database::StateProviderDatabase, State};
 use reth_rpc_eth_types::{
     cache::db::StateProviderTraitObjWrapper, error::FromEthApiError, EthApiError,
 };
-use reth_storage_api::{HeaderProvider, StateProviderFactory};
+use reth_storage_api::StateProviderFactory;
 
 use crate::{
     helpers::{Call, LoadBlock, Trace},
@@ -33,17 +33,6 @@ pub trait GetBlockAccessList: Trace + Call + LoadBlock {
                     .provider()
                     .state_by_block_id(block.parent_hash().into())
                     .map_err(Self::Error::from_eth_err)?;
-                // The block is replayed in full, so it is validated as it was on import; a
-                // chain whose rules need the parent header has to be given it.
-                let parent = eth_api
-                    .provider()
-                    .sealed_header_by_hash(block.parent_hash())
-                    .map_err(Self::Error::from_eth_err)?
-                    .ok_or_else(|| {
-                        Self::Error::from_eth_err(EthApiError::HeaderNotFound(
-                            block.parent_hash().into(),
-                        ))
-                    })?;
 
                 let mut db = State::builder()
                     .with_database(StateProviderDatabase::new(StateProviderTraitObjWrapper(state)))
@@ -52,7 +41,7 @@ pub trait GetBlockAccessList: Trace + Call + LoadBlock {
 
                 let block_txs = block.transactions_recovered();
                 let mut executor = RpcNodeCore::evm_config(&eth_api)
-                    .executor_for_block_with_parent(&mut db, block.sealed_block(), &parent)
+                    .executor_for_block(&mut db, block.sealed_block())
                     .map_err(RethError::other)
                     .map_err(Self::Error::from_eth_err)?;
 

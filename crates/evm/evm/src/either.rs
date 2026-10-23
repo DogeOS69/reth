@@ -5,7 +5,7 @@ use crate::{execute::Executor, Database, OnStateHook};
 // re-export Either
 pub use futures_util::future::Either;
 use reth_execution_types::{BlockExecutionOutput, BlockExecutionResult};
-use reth_primitives_traits::{NodePrimitives, RecoveredBlock};
+use reth_primitives_traits::{HeaderTy, NodePrimitives, RecoveredBlock, SealedHeader};
 
 impl<A, B, DB> Executor<DB> for Either<A, B>
 where
@@ -15,6 +15,17 @@ where
 {
     type Primitives = A::Primitives;
     type Error = A::Error;
+
+    fn validate_block_pre_execution(
+        &mut self,
+        block: &RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>,
+        parent: &SealedHeader<HeaderTy<Self::Primitives>>,
+    ) -> Result<(), Self::Error> {
+        match self {
+            Self::Left(a) => a.validate_block_pre_execution(block, parent),
+            Self::Right(b) => b.validate_block_pre_execution(block, parent),
+        }
+    }
 
     fn execute_one(
         &mut self,

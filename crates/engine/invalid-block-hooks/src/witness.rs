@@ -210,22 +210,13 @@ where
         parent_header: &SealedHeader<N::BlockHeader>,
         block: &RecoveredBlock<N::Block>,
     ) -> eyre::Result<(ExecutionWitness, BundleState)> {
-        let mut executor = self.evm_config.executor_with_parent(
-            StateProviderDatabase::new(
-                self.provider.state_by_block_hash(parent_header.hash())?,
-            ),
-            Some(parent_header.clone()),
-        );
+        let mut executor = self.evm_config.batch_executor(StateProviderDatabase::new(
+            self.provider.state_by_block_hash(parent_header.hash())?,
+        ));
 
-        // The hook exists to explain an invalid block, so a block that fails validation must
-        // still produce a witness: keep the state the attempt touched and report the failure
-        // alongside it rather than instead of it.
-        let outcome = executor.execute_one(block);
+        executor.execute_one(block)?;
         let db = executor.into_state();
         let (codes, preimages, hashed_state, bundle_state) = collect_execution_data(db)?;
-        if let Err(error) = outcome {
-            warn!(target: "engine::invalid_block_hooks::witness", %error, "Re-execution of the invalid block failed; the witness covers the state it reached");
-        }
 
         let state_provider = self.provider.state_by_block_hash(parent_header.hash())?;
         let witness = generate(codes, preimages, hashed_state, state_provider)?;

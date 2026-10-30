@@ -54,6 +54,8 @@ This branch is based on Reth `eb4c15e5e36d8776d46629beae4c0a69af7ab04f` (`v2.0.0
 - **Compatibility:** `find_canonical_header` and the two engine tree unit tests match upstream.
   Dropped: the `is_consistent_forkchoice_state` hunk (that function comes from PR #27247, not on
   this branch) and the end-to-end tests in `crates/ethereum/node/tests/e2e/forkchoice.rs` (file and
-  e2e setup hooks not on this branch).
+  e2e setup hooks not on this branch). The branch adds
+  `test_fcu_rejects_reorged_out_safe_and_finalized_with_pending_disk_reorg`: the same check now
+  makes a reorged-out safe or finalized hash an invalid forkchoice state instead of being accepted.
 - **Removal condition:** remove the backport when the selected upstream Reth base contains PR
   #27429.

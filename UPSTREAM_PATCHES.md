@@ -50,18 +50,26 @@ This branch is based on Reth `eb4c15e5e36d8776d46629beae4c0a69af7ab04f` (`v2.0.0
   (PR #26776), `f2d2bd23306801f7ba8f7380ab9740dead844c4a` (PR #24503),
   `b7a7a8a7295c4ea841d5960a7e39a473e7d7cebe` (PR #24499),
   `1f94488d1e42866d3f8280702a546d42a7b288af` (PR #26999),
-  `e63ec720ac2d11d9ff8694e54b22ac88b9714381` (PR #27106) and
-  `e88a669b1be89ef335e457d5093f8be61fc293ac` (PR #27107).
+  `e63ec720ac2d11d9ff8694e54b22ac88b9714381` (PR #27106),
+  `e88a669b1be89ef335e457d5093f8be61fc293ac` (PR #27107) and
+  `055fafc723d1df096e551a14a80e76d2483e97fa` (PR #27000).
 - **Purpose:** bound public RPC work on the blocking pool. Blocking IO tasks whose caller has gone
   skip or abandon their work; `eth_simulateV1`, `eth_callMany` and `eth_getLogs` range scans take a
   blocking IO permit like `eth_call`; and the `eth_call`/simulate/callMany blocking IO permits and
   the `eth_getProof` tracing permit are held inside the spawned task, so a dropped request no
-  longer frees its permit while the work keeps running.
+  longer frees its permit while the work keeps running. `eth_getLogs` range scans run window by
+  window, and each parallel receipt worker takes its own blocking IO permit (or runs on the scan's
+  task when none is free), so a cancelled scan no longer leaves workers running without one.
 - **Compatibility:** PRs #26776, #24503, #24499 and #26999 match upstream exactly. From PR #27106
   the `bal.rs` hunk is dropped: upstream moves an existing permit, but this branch's
   `get_block_access_list` takes none. Its `eth_simulateV1` hunk is resolved by hand onto this
   branch's older simulate setup with the same effect. From PR #27107 the `get_multi_proof` hunk is
-  dropped; that method does not exist on this branch. Upstream adds a test only for #26999; the
-  branch adds `simulate_and_call_many_wait_for_blocking_io_permit` in `reth-rpc`.
+  dropped; that method does not exist on this branch. From PR #27000 the per-block loop body and
+  the batch capacity keep this branch's code, which predates upstream's converter argument,
+  retry range (#23818) and capacity bound (#26971); its test expects the log-limit error at the
+  block that exceeded the limit, which is what this branch reports. Upstream adds tests for #26999
+  and #27000; the branch adds `simulate_and_call_many_wait_for_blocking_io_permit`,
+  `test_cancelled_range_scan_workers_hold_blocking_io_permits` and
+  `test_spawn_blocking_io_fut_drops_cancelled_future` in `reth-rpc`.
 - **Removal condition:** remove the backport when the selected upstream Reth base contains PRs
-  #26776, #24503, #24499, #26999, #27106 and #27107.
+  #26776, #24503, #24499, #26999, #27106, #27107 and #27000.

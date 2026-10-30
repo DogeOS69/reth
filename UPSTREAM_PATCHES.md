@@ -41,3 +41,18 @@ This branch is based on Reth `eb4c15e5e36d8776d46629beae4c0a69af7ab04f` (`v2.0.0
   delegation code remains accepted.
 - **Removal condition:** remove the backport when the selected upstream Reth base contains PR
   #26644 or equivalent EIP-3607 empty-code handling.
+
+## RLPx Hello identity check
+
+- **Scope:** `reth-network` session handshake (`authenticate_stream`).
+- **Source:** backport of upstream Reth commit `1c6945c561d37a79857c97ee65c77338223ef639`
+  (PR #26639).
+- **Purpose:** bind every session to the node id the ECIES handshake authenticated. A remote whose
+  `Hello` announces a different node id is disconnected with `UnexpectedHandshakeIdentity`, so it
+  cannot take over a trusted peer's id, its peer record, or its extra-protocol (scroll-wire)
+  connection.
+- **Compatibility:** the production code matches upstream exactly. The upstream session tests pass a
+  max message size to the pending-session functions (PR #22668), which this branch does not carry;
+  that argument is dropped from the tests.
+- **Removal condition:** remove the backport when the selected upstream Reth base contains PR
+  #26639.

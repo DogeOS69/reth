@@ -2100,4 +2100,70 @@ mod tests {
             "{err:?}"
         );
     }
+
+    /// The receipt workers of a parallel range scan run on their own blocking threads and are not
+    /// stopped when the scan is cancelled, so each worker must hold its own blocking IO permit
+    /// until it finishes instead of relying on the permit of the scan.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_cancelled_range_scan_workers_hold_blocking_io_permits() {
+        use reth_rpc_eth_api::helpers::SpawnBlocking;
+
+        async fn wait_for(what: &str, mut condition: impl FnMut() -> bool) {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while !condition() {
+                assert!(tokio::time::Instant::now() < deadline, "timed out waiting for {what}");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+
+        // an empty filter matches every header, so a full window is fetched by parallel workers
+        let provider = MockEthProvider::default();
+        let mut parent_hash = FixedBytes::default();
+        for number in 0..1_000u64 {
+            let header = alloy_consensus::Header { number, parent_hash, ..Default::default() };
+            parent_hash = header.hash_slow();
+            provider.add_header(parent_hash, header);
+        }
+        let receipts = provider.receipts.clone();
+
+        let eth_api = build_test_eth_api(provider);
+        let guard = eth_api.blocking_io_task_guard().clone();
+        let total = guard.available_permits();
+        let eth_filter = EthFilter::new(eth_api, EthFilterConfig::default(), Runtime::test());
+
+        // workers block on the receipts lock, held by another thread until it is told to release it
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let lock_holder = std::thread::spawn(move || {
+            let _receipts_lock = receipts.lock();
+            locked_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        locked_rx.recv().unwrap();
+
+        let scan = tokio::spawn(eth_filter.inner.clone().get_logs_in_block_range(
+            Filter::default(),
+            0,
+            999,
+            QueryLimits::default(),
+        ));
+
+        let workers = DEFAULT_PARALLEL_CONCURRENCY;
+        wait_for("the scan and its workers to take permits", || {
+            guard.available_permits() == total - 1 - workers
+        })
+        .await;
+
+        // cancelling the scan releases its own permit, the stalled workers keep theirs
+        scan.abort();
+        wait_for("the scan to release its permit", || guard.available_permits() == total - workers)
+            .await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(guard.available_permits(), total - workers);
+
+        release_tx.send(()).unwrap();
+        lock_holder.join().unwrap();
+        wait_for("the workers to release their permits", || guard.available_permits() == total)
+            .await;
+    }
 }

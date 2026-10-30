@@ -57,6 +57,8 @@ This branch is based on Reth `eb4c15e5e36d8776d46629beae4c0a69af7ab04f` (`v2.0.0
   `SNAPPY_PING_MESSAGE`/`SNAPPY_PONG_MESSAGE`). They run on a minimal `IncomingFramesTransport`,
   build compressed frames with the Snappy encoder directly instead of `compress_frame`, and use the
   byte-identical `P2PMessage::{Ping, Pong}` encodings instead of the constants. The two upstream
-  flush-batching tests that cover those perf commits are omitted.
+  flush-batching tests that cover those perf commits are omitted. The branch adds
+  `test_invalid_ping_pong_payload_is_protocol_breach` in `reth-network`, which upstream's tests
+  check only for `TooManyPings`.
 - **Removal condition:** remove the backport when the selected upstream Reth base contains PRs
   #26698 and #26702.

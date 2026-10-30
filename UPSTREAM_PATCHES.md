@@ -41,3 +41,22 @@ This branch is based on Reth `eb4c15e5e36d8776d46629beae4c0a69af7ab04f` (`v2.0.0
   delegation code remains accepted.
 - **Removal condition:** remove the backport when the selected upstream Reth base contains PR
   #26644 or equivalent EIP-3607 empty-code handling.
+
+## P2P ping validation and pacing
+
+- **Scope:** `reth-eth-wire` `P2PStream` Ping/Pong handling, and the matching `reth-network` error
+  classification.
+- **Source:** backport of upstream Reth commits `20fab813c08ab9f5c7f7a2db1d3c304d717fe46c`
+  (PR #26698) and `ae81966b68e71028b9efeead3e4a9bcb38ffe049` (PR #26702).
+- **Purpose:** reject Ping/Pong frames whose payload is not the 1-byte empty list before
+  decompressing them, and limit incoming pings to a burst of 5 refilled at one per second. A peer
+  that floods pings without reading can no longer grow the unbounded outgoing Pong queue.
+- **Compatibility:** the production code matches upstream exactly; `P2PStream::new` lacks the
+  upstream `compress_scratch` field, which comes from a later perf commit. The upstream tests rely
+  on test helpers from later perf commits (`FlushCountingTransport`, `compress_frame`,
+  `SNAPPY_PING_MESSAGE`/`SNAPPY_PONG_MESSAGE`). They run on a minimal `IncomingFramesTransport`,
+  build compressed frames with the Snappy encoder directly instead of `compress_frame`, and use the
+  byte-identical `P2PMessage::{Ping, Pong}` encodings instead of the constants. The two upstream
+  flush-batching tests that cover those perf commits are omitted.
+- **Removal condition:** remove the backport when the selected upstream Reth base contains PRs
+  #26698 and #26702.

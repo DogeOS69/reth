@@ -348,6 +348,14 @@ mod tests {
         assert_eq!(err.should_backoff(), Some(BackoffKind::Medium));
     }
 
+    /// A malformed Ping or Pong is a protocol breach, so an active session is disconnected with a
+    /// reputation penalty instead of only being closed.
+    #[test]
+    fn test_invalid_ping_pong_payload_is_protocol_breach() {
+        let err = EthStreamError::P2PStreamError(P2PStreamError::InvalidPingPongPayload(0x02));
+        assert!(err.is_protocol_breach());
+    }
+
     #[test]
     fn test_address_in_use_message() {
         let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 1234));

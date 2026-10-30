@@ -2402,3 +2402,53 @@ async fn test_fcu_back_to_reorged_out_head_with_pending_disk_reorg() {
 async fn test_fcu_back_to_reorged_out_head_above_shorter_branch_with_pending_disk_reorg() {
     assert_fcu_back_to_reorged_out_head_with_pending_disk_reorg(1).await;
 }
+
+/// A reorged-out block whose disk removal is still pending must not be accepted as the safe or
+/// finalized block on top of the new canonical branch.
+#[tokio::test]
+async fn test_fcu_rejects_reorged_out_safe_and_finalized_with_pending_disk_reorg() {
+    reth_tracing::init_test_tracing();
+    let mut test_harness = TestHarness::new(MAINNET.clone());
+    let old: Vec<_> = test_harness.block_builder.get_executed_blocks(0..4).collect();
+    test_harness = test_harness.with_blocks(old.clone());
+    let stale = old[2].recovered_block().num_hash();
+
+    let new: Vec<_> = test_harness
+        .block_builder
+        .create_fork(old[0].recovered_block(), 3)
+        .into_iter()
+        .map(|block| {
+            ExecutedBlock::new(
+                Arc::new(block),
+                Arc::new(BlockExecutionOutput::default()),
+                ComputedTrieData::default(),
+            )
+        })
+        .collect();
+    for block in &new {
+        test_harness.tree.state.tree_state.insert_executed(block.clone());
+    }
+    let new_tip = new.last().unwrap().recovered_block().hash();
+
+    let head_only = ForkchoiceState {
+        head_block_hash: new_tip,
+        safe_block_hash: B256::ZERO,
+        finalized_block_hash: B256::ZERO,
+    };
+    let outcome = test_harness.tree.on_forkchoice_updated(head_only, None).unwrap();
+    assert_eq!(outcome.outcome.forkchoice_status(), ForkchoiceStatus::Valid);
+
+    // Persistence is not advanced, so the reorged-out block is still found on disk.
+    assert!(test_harness.provider.header(stale.hash).unwrap().is_some());
+
+    for state in [
+        ForkchoiceState { safe_block_hash: stale.hash, ..head_only },
+        ForkchoiceState { finalized_block_hash: stale.hash, ..head_only },
+    ] {
+        let outcome = test_harness.tree.on_forkchoice_updated(state, None).unwrap();
+        assert_eq!(outcome.outcome.forkchoice_status(), ForkchoiceStatus::Invalid, "{state:?}");
+    }
+    let canonical = &test_harness.tree.canonical_in_memory_state;
+    assert_ne!(canonical.get_safe_num_hash(), Some(stale));
+    assert_ne!(canonical.get_finalized_num_hash(), Some(stale));
+}

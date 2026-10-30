@@ -54,6 +54,7 @@ This branch is based on Reth `eb4c15e5e36d8776d46629beae4c0a69af7ab04f` (`v2.0.0
 - **Compatibility:** only the reorder is ported, using this branch's `ChangesetCache` API. The rest
   of PR #27615 targets the post-2.0 storage-overlay changeset cache and persistence frontiers, which
   this branch does not have, and its test depends on them. The branch adds
-  `unwind_trie_state_with_cold_changeset_cache`, which fails on the old order.
+  `unwind_trie_state_with_cold_changeset_cache` and `unwind_tip_trie_state_with_cold_changeset_cache`
+  (a two-block and a tip-only unwind), which fail on the old order.
 - **Removal condition:** remove the backport when the selected upstream Reth base contains PR
   #27615.

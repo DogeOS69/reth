@@ -968,16 +968,17 @@ impl PeersManager {
     }
 
     /// Removes the tracked node from the trusted set.
+    ///
+    /// The id is always removed from the trusted set, even when no peer record exists yet (for
+    /// example a peer added by public key only that has never connected), so trusted-only
+    /// admission no longer accepts it. A tracked trusted peer is downgraded to basic.
     pub(crate) fn remove_peer_from_trusted_set(&mut self, peer_id: PeerId) {
-        let Entry::Occupied(mut entry) = self.peers.entry(peer_id) else { return };
-        if !entry.get().is_trusted() {
-            return
-        }
-
-        let peer = entry.get_mut();
-        peer.kind = PeerKind::Basic;
-
         self.trusted_peer_ids.remove(&peer_id);
+        if let Some(peer) = self.peers.get_mut(&peer_id) &&
+            peer.is_trusted()
+        {
+            peer.kind = PeerKind::Basic;
+        }
     }
 
     /// Returns the best idle peer to connect to.
@@ -1366,7 +1367,7 @@ mod tests {
         error::SessionError,
         peers::{
             ConnectionInfo, InboundConnectionError, PeerAction, PeerAddr, PeerBackoffDurations,
-            PeerConnectionState,
+            PeerConnectionState, PeerKind,
         },
         session::PendingSessionHandshakeError,
         PeersConfig,
@@ -2595,6 +2596,94 @@ mod tests {
         };
         assert_eq!(basic_peer, peer_id);
         assert!(!peers.peers.contains_key(&basic_peer));
+    }
+
+    #[tokio::test]
+    async fn test_revoke_trusted_id_without_peer_record() {
+        let mut peers = PeersManager::new(PeersConfig::test());
+        let peer_id = PeerId::random();
+
+        peers.add_trusted_peer_id(peer_id);
+        assert!(peers.trusted_peer_ids.contains(&peer_id));
+        assert!(!peers.peers.contains_key(&peer_id));
+
+        peers.remove_peer_from_trusted_set(peer_id);
+        assert!(!peers.trusted_peer_ids.contains(&peer_id));
+        assert!(!peers.peers.contains_key(&peer_id));
+    }
+
+    #[tokio::test]
+    async fn test_incoming_rejected_after_revoking_trusted_id_in_trusted_only_mode() {
+        let mut peers = PeersManager::new(PeersConfig::test().with_trusted_nodes_only(true));
+        let peer_id = PeerId::random();
+
+        // Trust by public key only, then revoke before the peer ever connects.
+        peers.add_trusted_peer_id(peer_id);
+        peers.remove_peer_from_trusted_set(peer_id);
+
+        let sock = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 1, 2)), 8009);
+        assert!(peers.on_incoming_pending_session(sock.ip()).is_ok());
+        peers.on_incoming_session_established(peer_id, sock);
+
+        assert_eq!(peers.connection_info.num_pending_in, 0);
+        assert_eq!(peers.connection_info.num_inbound, 0);
+        let Some(PeerAction::DisconnectUntrustedIncoming { peer_id: rejected }) =
+            peers.queued_actions.pop_front()
+        else {
+            panic!("expected the revoked peer to be disconnected as untrusted")
+        };
+        assert_eq!(rejected, peer_id);
+        assert!(!peers.peers.contains_key(&peer_id));
+    }
+
+    #[tokio::test]
+    async fn test_revoke_trusted_id_with_trusted_peer_record() {
+        let mut peers = PeersManager::new(PeersConfig::test());
+        let peer_id = PeerId::random();
+        let addr = PeerAddr::from_tcp(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8008));
+
+        peers.add_trusted_peer(peer_id, addr);
+        assert!(peers.trusted_peer_ids.contains(&peer_id));
+        assert_eq!(peers.peers.get(&peer_id).unwrap().kind, PeerKind::Trusted);
+
+        peers.remove_peer_from_trusted_set(peer_id);
+        assert!(!peers.trusted_peer_ids.contains(&peer_id));
+        assert_eq!(peers.peers.get(&peer_id).unwrap().kind, PeerKind::Basic);
+    }
+
+    #[tokio::test]
+    async fn test_revoke_trusted_id_with_non_trusted_peer_record() {
+        for kind in [PeerKind::Basic, PeerKind::Static] {
+            let mut peers = PeersManager::new(PeersConfig::test());
+            let peer_id = PeerId::random();
+            let addr = PeerAddr::from_tcp(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8008));
+
+            // The id is in the trusted set while the record carries a non-trusted kind.
+            peers.add_trusted_peer_id(peer_id);
+            peers.add_peer_kind(peer_id, Some(kind), addr, None);
+            assert!(peers.trusted_peer_ids.contains(&peer_id));
+            assert_eq!(peers.peers.get(&peer_id).unwrap().kind, kind);
+
+            peers.remove_peer_from_trusted_set(peer_id);
+            assert!(!peers.trusted_peer_ids.contains(&peer_id));
+            assert_eq!(peers.peers.get(&peer_id).unwrap().kind, kind);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_revoke_trusted_id_repeatedly() {
+        let mut peers = PeersManager::new(PeersConfig::test());
+        let peer_id = PeerId::random();
+
+        // Removing an id that was never trusted is a no-op.
+        peers.remove_peer_from_trusted_set(peer_id);
+        assert!(!peers.trusted_peer_ids.contains(&peer_id));
+
+        peers.add_trusted_peer_id(peer_id);
+        peers.remove_peer_from_trusted_set(peer_id);
+        peers.remove_peer_from_trusted_set(peer_id);
+        assert!(!peers.trusted_peer_ids.contains(&peer_id));
+        assert!(!peers.peers.contains_key(&peer_id));
     }
 
     #[tokio::test]

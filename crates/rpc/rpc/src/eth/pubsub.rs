@@ -373,3 +373,48 @@ where
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::EthApi;
+    use reth_chain_state::CanonStateNotification;
+    use reth_evm_ethereum::EthEvmConfig;
+    use reth_network_api::noop::NoopNetwork;
+    use reth_primitives_traits::SealedHeader;
+    use reth_provider::{providers::BlockchainProvider, test_utils::create_test_provider_factory};
+    use reth_transaction_pool::test_utils::testing_pool;
+    use std::{pin::pin, time::Duration};
+
+    /// A log subscriber that falls behind the canonical state broadcast must skip the missed
+    /// notifications instead of ending its subscription task.
+    #[tokio::test]
+    async fn log_stream_survives_lagged_canonical_state() {
+        let provider = BlockchainProvider::with_latest(
+            create_test_provider_factory(),
+            SealedHeader::default(),
+        )
+        .unwrap();
+        let eth_api = EthApi::builder(
+            provider.clone(),
+            testing_pool(),
+            NoopNetwork::default(),
+            EthEvmConfig::mainnet(),
+        )
+        .build();
+        let pubsub = EthPubSub::new(eth_api, Runtime::test());
+        let mut logs = pin!(pubsub.log_stream(Filter::default()));
+
+        // Send more notifications than the broadcast channel holds (256) before the stream is
+        // polled, so its first receive reports a lag.
+        let canonical_state = provider.canonical_in_memory_state();
+        for _ in 0..512 {
+            canonical_state
+                .notify_canon_state(CanonStateNotification::Commit { new: Arc::default() });
+        }
+
+        // The notifications carry no logs, and the sender stays alive, so a healthy stream drains
+        // them and then waits for more.
+        assert!(tokio::time::timeout(Duration::from_millis(200), logs.next()).await.is_err());
+    }
+}

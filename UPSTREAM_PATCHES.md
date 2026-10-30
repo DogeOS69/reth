@@ -41,3 +41,16 @@ This branch is based on Reth `eb4c15e5e36d8776d46629beae4c0a69af7ab04f` (`v2.0.0
   delegation code remains accepted.
 - **Removal condition:** remove the backport when the selected upstream Reth base contains PR
   #26644 or equivalent EIP-3607 empty-code handling.
+
+## Pending inbound throttle at capacity
+
+- **Scope:** `reth-network` `PeersManager` inbound admission.
+- **Source:** exact backport of upstream Reth commit `bc98f383d23c68ccd3b9f067ba199e825eae737f`
+  (PR #27842).
+- **Purpose:** when the inbound slots are full and trusted peer ids are configured, pending inbound
+  connections admitted for possible trusted peers are now IP-throttled too, so one host can no
+  longer hold every pending slot. Throttle entries move to a bounded LRU separate from security
+  bans and only apply to global IPs.
+- **Compatibility:** none beyond upstream; the diff matches upstream line for line.
+- **Removal condition:** remove the backport when the selected upstream Reth base contains PR
+  #27842.

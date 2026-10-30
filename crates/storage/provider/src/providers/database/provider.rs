@@ -5440,8 +5440,7 @@ mod tests {
     /// is unwound. Each block's revert is derived from the hashed state after that block, so with
     /// the hashed state already reverted, branch nodes created in the unwound blocks are never
     /// reverted and stay in the trie tables.
-    #[test]
-    fn unwind_trie_state_with_cold_changeset_cache() {
+    fn assert_cold_cache_unwind_restores_trie(from: u64) {
         type TestStateRoot<'a, TX> = reth_trie::StateRoot<
             reth_trie_db::DatabaseTrieCursorFactory<&'a TX, reth_trie_db::LegacyKeyAdapter>,
             reth_trie_db::DatabaseHashedCursorFactory<&'a TX>,
@@ -5527,8 +5526,7 @@ mod tests {
                 .unwrap();
             }
             for block in 1..=2 {
-                // Account 0 is in every changeset because its storage changes in every block.
-                if i == 0 || account(i, block) != account(i, block - 1) {
+                if account(i, block) != account(i, block - 1) {
                     tx.put::<tables::AccountChangeSets>(
                         block,
                         AccountBeforeTx { address: address(i), info: account(i, block - 1) },
@@ -5558,15 +5556,47 @@ mod tests {
 
         // Nothing has populated the changeset cache, so the unwind computes the revert itself.
         let provider_rw = factory.provider_rw().unwrap();
-        provider_rw.unwind_trie_state_from(1).unwrap();
+        provider_rw.unwind_trie_state_from(from).unwrap();
 
         // With empty prefix sets the roots are built from the stored trie nodes, so they only match
-        // the block 0 roots if the unwind restored those nodes.
+        // the roots before the unwound range if the unwind restored those nodes.
         let tx = provider_rw.tx_ref();
         assert_eq!(
             TestStorageRoot::from_tx_hashed(tx, keccak256(address(0))).root().unwrap(),
-            storage_root(0)
+            storage_root(from - 1)
         );
-        assert_eq!(TestStateRoot::from_tx(tx).root().unwrap(), state_root(0));
+        assert_eq!(TestStateRoot::from_tx(tx).root().unwrap(), state_root(from - 1));
+
+        // A leftover node that no stored parent references does not change the roots, so the
+        // stored tables must also equal the tables built from scratch for that state.
+        type TrieTables = (
+            Vec<(StoredNibbles, reth_trie::BranchNodeCompact)>,
+            Vec<(B256, reth_trie::StorageTrieEntry)>,
+        );
+        fn trie_tables<T: DbTx>(tx: &T) -> TrieTables {
+            let mut accounts = tx.cursor_read::<tables::AccountsTrie>().unwrap();
+            let mut storages = tx.cursor_read::<tables::StoragesTrie>().unwrap();
+            (
+                accounts.walk(None).unwrap().collect::<Result<_, _>>().unwrap(),
+                storages.walk(None).unwrap().collect::<Result<_, _>>().unwrap(),
+            )
+        }
+
+        let unwound = trie_tables(tx);
+        tx.clear::<tables::AccountsTrie>().unwrap();
+        tx.clear::<tables::StoragesTrie>().unwrap();
+        let (_, updates) = TestStateRoot::from_tx(tx).root_with_updates().unwrap();
+        provider_rw.write_trie_updates(updates).unwrap();
+        assert!(unwound == trie_tables(provider_rw.tx_ref()), "unwound trie tables differ");
+    }
+
+    #[test]
+    fn unwind_trie_state_with_cold_changeset_cache() {
+        assert_cold_cache_unwind_restores_trie(1);
+    }
+
+    #[test]
+    fn unwind_tip_trie_state_with_cold_changeset_cache() {
+        assert_cold_cache_unwind_restores_trie(2);
     }
 }

@@ -41,3 +41,17 @@ This branch is based on Reth `eb4c15e5e36d8776d46629beae4c0a69af7ab04f` (`v2.0.0
   delegation code remains accepted.
 - **Removal condition:** remove the backport when the selected upstream Reth base contains PR
   #26644 or equivalent EIP-3607 empty-code handling.
+
+## Trusted peer revocation
+
+- **Scope:** `reth-network` trusted peer set and trusted peer resolver.
+- **Source:** exact backport of upstream Reth commit
+  `b05e68db85fb29c4eaa707728171acb0fd0cd23d` (PR #24406), and a focused backport of upstream Reth
+  commit `f9858796a53be55d5861b13e0eb6b22d8af85f9e` (PR #27948).
+- **Purpose:** removing a trusted peer always drops its id from the trusted set and the resolver,
+  even when the peer has no record or a non-trusted record, so a revoked peer no longer passes the
+  `--trusted-only` admission check.
+- **Compatibility:** the function body matches upstream. The upstream test's admin ban assertions
+  are omitted because this branch does not carry PR #25140 (`admin` ban and unban methods).
+- **Removal condition:** remove the backport when the selected upstream Reth base contains PRs
+  #24406 and #27948.

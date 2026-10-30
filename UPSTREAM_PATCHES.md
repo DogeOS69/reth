@@ -41,3 +41,15 @@ This branch is based on Reth `eb4c15e5e36d8776d46629beae4c0a69af7ab04f` (`v2.0.0
   delegation code remains accepted.
 - **Removal condition:** remove the backport when the selected upstream Reth base contains PR
   #26644 or equivalent EIP-3607 empty-code handling.
+
+## Syncing subscription close
+
+- **Scope:** `reth-rpc` `eth_subscribe("syncing")` task.
+- **Source:** exact backport of upstream Reth commit `d85d9deaef3b63161a339e2049f1917574eb1d2a`
+  (PR #27455).
+- **Purpose:** end the syncing subscription task when its sink closes (unsubscribe or disconnect).
+  The task only sends when the sync status changes, so on a synced node it previously never noticed
+  a closed sink and lived forever, holding a canonical-state receiver.
+- **Compatibility:** none beyond upstream; the diff matches upstream line for line.
+- **Removal condition:** remove the backport when the selected upstream Reth base contains PR
+  #27455.

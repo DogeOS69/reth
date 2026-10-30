@@ -41,3 +41,17 @@ This branch is based on Reth `eb4c15e5e36d8776d46629beae4c0a69af7ab04f` (`v2.0.0
   delegation code remains accepted.
 - **Removal condition:** remove the backport when the selected upstream Reth base contains PR
   #26644 or equivalent EIP-3607 empty-code handling.
+
+## Log subscription broadcast lag
+
+- **Scope:** `reth-rpc` `eth_subscribe("logs")` stream.
+- **Source:** exact backport of upstream Reth commit `6e4009eed404816b3d33c2869e2022189af17df7`
+  (PR #23561).
+- **Purpose:** build the log stream on `canonical_state_stream()`, which skips broadcast lag, instead
+  of a raw `BroadcastStream` whose `Err(Lagged)` item hit an `expect` and panicked the subscription
+  task. A slow WS client or a burst of canonical updates could silently end a client's log feed.
+- **Compatibility:** the diff matches upstream line for line. Upstream has no test for this change;
+  the branch adds `log_stream_survives_lagged_canonical_state` in `pubsub.rs`, which fails on the
+  old code.
+- **Removal condition:** remove the backport when the selected upstream Reth base contains PR
+  #23561. Drop the added test with it, or keep it if upstream still lacks one.

@@ -197,3 +197,28 @@ This branch is based on Reth `eb4c15e5e36d8776d46629beae4c0a69af7ab04f` (`v2.0.0
   are omitted because this branch does not carry PR #25140 (`admin` ban and unban methods).
 - **Removal condition:** remove the backport when the selected upstream Reth base contains PRs
   #24406 and #27948.
+
+## Bounded session queues
+
+- **Scope:** `reth-eth-wire` RLPx multiplexer (`multiplex.rs`) and `P2PStream`, the
+  `ProtocolIngressLimits` type, and the `reth-network` `ConnectionHandler::inbound_limits` hook and
+  error classification.
+- **Source:** backport of upstream Reth commits `01cbe9bdada95a3267a6b75bd54b27b6452ab97a`
+  (PR #25031) and `dd637cefe1f79f6e4815a2389a36412296cde4ad` (PR #26660).
+- **Purpose:** bound the queues between the RLPx connection and its protocols. The outbound mux
+  buffer gets a soft byte cap and polls protocols in turn (#25031). Each inbound protocol queue,
+  primary (eth) and satellite (scroll-wire) alike, is bounded by message count and bytes, with a
+  shared per-connection byte budget, both during the eth `Status` handshake and after it; the
+  handshake loop polls the handshake and satellites before reading more frames, and yields every
+  32 frames (#26660). A full queue ends the session with `SubprotocolInboundBufferFull`.
+- **Compatibility:** #25031 matches upstream exactly. #26660 matches upstream except that the byte
+  budget uses `AtomicUsize::fetch_update` in place of `try_update` (Rust 1.95; this branch and its
+  downstream builds use 1.93), and its two `P2PStream` tests use a local frame helper and the
+  existing `IncomingFramesTransport` because `compress_frame` comes from a later perf commit.
+  `ConnectionHandler::inbound_limits` has a default, so the scroll-wire handler keeps compiling and
+  gets the default limits (1,024 messages, 32 MiB). The branch adds
+  `pre_status_scroll_wire_queue_is_bounded_by_default_limits`, which upstream's tests do not cover
+  with the real eth handshake. The branch is stacked on the RLPx Hello identity check and P2P ping
+  validation and pacing backports.
+- **Removal condition:** remove the backport when the selected upstream Reth base contains PRs
+  #25031 and #26660.

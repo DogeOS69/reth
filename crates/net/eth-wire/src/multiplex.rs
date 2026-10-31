@@ -1087,7 +1087,7 @@ mod tests {
             connect_passthrough, eth_handshake, eth_hello,
             proto::{test_hello, TestProtoMessage},
         },
-        UnauthedEthStream, UnauthedP2PStream,
+        EthVersion, UnauthedEthStream, UnauthedP2PStream,
     };
     use futures::{stream, task::noop_waker_ref};
     use reth_eth_wire_types::EthNetworkPrimitives;
@@ -1437,6 +1437,58 @@ mod tests {
             .await;
 
         assert!(stream.is_ok());
+    }
+
+    /// A peer that negotiates eth and the scroll-wire capability but withholds its eth `Status`
+    /// cannot grow the queue of a satellite that is not draining it: the eth handshake fails once
+    /// the default message or byte budget is exhausted.
+    #[tokio::test]
+    async fn pre_status_scroll_wire_queue_is_bounded_by_default_limits() {
+        async fn flood_before_status(payload: &[u8], frame_count: usize) {
+            let scroll = Capability::new_static("scroll", 1);
+            let shared_capabilities = SharedCapabilities::try_new(
+                vec![EthVersion::Eth68.into(), Protocol::new(scroll.clone(), 1)],
+                vec![Capability::eth(EthVersion::Eth68), scroll.clone()],
+            )
+            .unwrap();
+            let scroll_offset = shared_capabilities.find(&scroll).unwrap().message_id_offset();
+            let frames =
+                (0..frame_count).map(|_| compressed_frame(scroll_offset, payload)).collect();
+            let conn = P2PStream::new(
+                InboundFramesTransport { frames, writable: AtomicBool::new(true) },
+                shared_capabilities,
+            );
+            let mut mux = RlpxProtocolMultiplexer::new(conn);
+            mux.install_protocol(&scroll, |conn| HoldingProtocol { _conn: conn }).unwrap();
+
+            let (_, fork_filter) = eth_handshake();
+            let mut handshake = pin!(mux.into_eth_satellite_stream::<EthNetworkPrimitives>(
+                UnifiedStatus::default(),
+                fork_filter,
+                Arc::new(EthHandshake::default()),
+            ));
+            let err = tokio::time::timeout(std::time::Duration::from_secs(5), &mut handshake)
+                .await
+                .expect("pre-Status flood must be rejected, not buffered")
+                .unwrap_err();
+            let EthStreamError::P2PStreamError(P2PStreamError::SubprotocolInboundBufferFull {
+                capability,
+            }) = &err
+            else {
+                panic!("unexpected handshake error: {err:?}")
+            };
+            assert_eq!(*capability, scroll);
+        }
+
+        // Message budget: tiny frames stop at the default per-protocol message limit.
+        let limit = ProtocolIngressLimits::DEFAULT_MAX_BUFFERED_MESSAGES;
+        flood_before_status(&[0], limit + 8).await;
+
+        // Byte budget: 1 MiB frames stop at the default 32 MiB per-protocol byte limit.
+        let payload = vec![0; 1024 * 1024];
+        let fit = ProtocolIngressLimits::DEFAULT_MAX_BUFFERED_BYTES / (payload.len() + 1);
+        assert!(fit < limit);
+        flood_before_status(&payload, fit + 8).await;
     }
 
     #[tokio::test]

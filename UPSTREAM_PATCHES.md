@@ -96,12 +96,12 @@ This branch is based on Reth `eb4c15e5e36d8776d46629beae4c0a69af7ab04f` (`v2.0.0
   capability (#26654), so `P2PStream`'s unknown-ID check, the per-protocol frame limit and the
   multiplexer's routing all agree on which protocol owns an ID.
 - **Compatibility:** #25031 and #26654 match upstream exactly. #26654 is committed after #26660 on
-  this branch (it was added after the branch was pushed); upstream has it first. #26660 matches
-  upstream except that the byte budget uses `AtomicUsize::fetch_update` in place of `try_update`
-  (Rust 1.95; this branch and its downstream builds use 1.93), and its two `P2PStream` tests use a
-  local frame helper and the existing `IncomingFramesTransport` because `compress_frame` comes from
-  a later perf commit. `ConnectionHandler::inbound_limits` has a default, so the scroll-wire handler
-  keeps compiling and gets the default limits (1,024 messages, 32 MiB). The branch adds
+  this branch; upstream applies it before #26660. #26660 matches upstream except that the byte
+  budget uses `AtomicUsize::fetch_update` in place of `try_update` (Rust 1.95; this branch and its
+  downstream builds use 1.93), and its two `P2PStream` tests use a local frame helper and the
+  existing `IncomingFramesTransport` because `compress_frame` comes from a later perf commit.
+  `ConnectionHandler::inbound_limits` has a default, so the scroll-wire handler keeps compiling and
+  gets the default limits (1,024 messages, 32 MiB). The branch adds
   `pre_status_scroll_wire_queue_is_bounded_by_default_limits`, which upstream's tests do not cover
   with the real eth handshake. The branch is stacked on the RLPx Hello identity check and P2P ping
   validation and pacing backports.

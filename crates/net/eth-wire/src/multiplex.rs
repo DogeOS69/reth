@@ -1484,7 +1484,7 @@ mod tests {
         let limit = ProtocolIngressLimits::DEFAULT_MAX_BUFFERED_MESSAGES;
         flood_before_status(&[0], limit + 8).await;
 
-        // Byte budget: 1 MiB frames stop at the default 32 MiB per-protocol byte limit.
+        // Byte budgets: 1 MiB frames stop at the default 32 MiB protocol and connection budgets.
         let payload = vec![0; 1024 * 1024];
         let fit = ProtocolIngressLimits::DEFAULT_MAX_BUFFERED_BYTES / (payload.len() + 1);
         assert!(fit < limit);

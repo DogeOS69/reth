@@ -42,6 +42,23 @@ This branch is based on Reth `eb4c15e5e36d8776d46629beae4c0a69af7ab04f` (`v2.0.0
 - **Removal condition:** remove the backport when the selected upstream Reth base contains PR
   #26644 or equivalent EIP-3607 empty-code handling.
 
+## Trie unwind revert ordering
+
+- **Scope:** `reth-provider` `DatabaseProvider::unwind_trie_state_from`.
+- **Source:** focused backport of the `unwind_trie_state_from` reorder from upstream Reth commit
+  `05ba48120a0ce8d6beb65f0b2a7ad4710f4f2915` (PR #27615).
+- **Purpose:** compute the trie revert for the unwound range before account and storage hashing are
+  unwound. On a changeset cache miss the revert is derived from the hashed state, and computing it
+  from already-reverted hashed state left branch nodes created in the unwound blocks in the trie
+  tables, giving a wrong state root on the next block.
+- **Compatibility:** only the reorder is ported, using this branch's `ChangesetCache` API. The rest
+  of PR #27615 targets the post-2.0 storage-overlay changeset cache and persistence frontiers, which
+  this branch does not have, and its test depends on them. The branch adds
+  `unwind_trie_state_with_cold_changeset_cache` and `unwind_tip_trie_state_with_cold_changeset_cache`
+  (a two-block and a tip-only unwind), which fail on the old order.
+- **Removal condition:** remove the backport when the selected upstream Reth base contains PR
+  #27615.
+
 ## Stale persisted forkchoice head
 
 - **Scope:** `reth-engine-tree` `EngineApiTreeHandler::find_canonical_header`.

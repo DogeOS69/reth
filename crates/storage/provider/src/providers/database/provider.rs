@@ -835,6 +835,19 @@ impl<TX: DbTx + DbTxMut + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
     /// This includes calculating the resulted state root and comparing it with the parent block
     /// state root.
     pub fn unwind_trie_state_from(&self, from: BlockNumber) -> ProviderResult<()> {
+        // Get the database tip block number
+        let db_tip_block = self
+            .get_stage_checkpoint(reth_stages_types::StageId::Finish)?
+            .as_ref()
+            .map(|chk| chk.block_number)
+            .ok_or_else(|| ProviderError::InsufficientChangesets {
+                requested: from,
+                available: 0..=0,
+            })?;
+
+        // Calculate changesets before modifying hashed state used to reconstruct historical tries.
+        let trie_revert = self.changeset_cache.get_or_compute_range(self, from..=db_tip_block)?;
+
         let changed_accounts = self.account_changesets_range(from..)?;
 
         // Unwind account hashes.
@@ -852,17 +865,6 @@ impl<TX: DbTx + DbTxMut + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
         self.unwind_storage_history_indices(changed_storages.iter().copied())?;
 
         // Unwind accounts/storages trie tables using the revert.
-        // Get the database tip block number
-        let db_tip_block = self
-            .get_stage_checkpoint(reth_stages_types::StageId::Finish)?
-            .as_ref()
-            .map(|chk| chk.block_number)
-            .ok_or_else(|| ProviderError::InsufficientChangesets {
-                requested: from,
-                available: 0..=0,
-            })?;
-
-        let trie_revert = self.changeset_cache.get_or_compute_range(self, from..=db_tip_block)?;
         self.write_trie_updates_sorted(&trie_revert)?;
 
         Ok(())
@@ -5432,5 +5434,169 @@ mod tests {
         assert!(all_blocks.contains(&3), "block 3 should remain");
         assert!(!all_blocks.contains(&7), "block 7 should be unwound");
         assert!(!all_blocks.contains(&10), "block 10 should be unwound");
+    }
+
+    /// Unwinding with a cold changeset cache must compute the trie revert before the hashed state
+    /// is unwound. Each block's revert is derived from the hashed state after that block, so with
+    /// the hashed state already reverted, branch nodes created in the unwound blocks are never
+    /// reverted and stay in the trie tables.
+    fn assert_cold_cache_unwind_restores_trie(from: u64) {
+        type TestStateRoot<'a, TX> = reth_trie::StateRoot<
+            reth_trie_db::DatabaseTrieCursorFactory<&'a TX, reth_trie_db::LegacyKeyAdapter>,
+            reth_trie_db::DatabaseHashedCursorFactory<&'a TX>,
+        >;
+        type TestStorageRoot<'a, TX> = reth_trie::StorageRoot<
+            reth_trie_db::DatabaseTrieCursorFactory<&'a TX, reth_trie_db::LegacyKeyAdapter>,
+            reth_trie_db::DatabaseHashedCursorFactory<&'a TX>,
+        >;
+        use reth_trie_db::{DatabaseStateRoot, DatabaseStorageRoot};
+
+        const NUM_ACCOUNTS: u8 = 128;
+        const NUM_SLOTS: u64 = 600;
+
+        // Block 1 changes accounts 0..32 and slots 0..150 of account 0. Block 2 changes accounts
+        // 16..48, creates accounts 64..128 and creates slots 300..600, so the tip trie has branch
+        // nodes that did not exist before it.
+        let account = |i: u8, block: u64| {
+            if i >= 64 && block < 2 {
+                return None
+            }
+            let nonce = if block >= 2 && (16..48).contains(&i) {
+                2
+            } else if block >= 1 && i < 32 {
+                1
+            } else {
+                0
+            };
+            Some(Account { nonce, balance: U256::from(i), bytecode_hash: None })
+        };
+        let slot_value = |slot: u64, block: u64| {
+            if slot >= 300 {
+                if block >= 2 {
+                    U256::from(3)
+                } else {
+                    U256::ZERO
+                }
+            } else if block >= 1 && slot < 150 {
+                U256::from(2)
+            } else {
+                U256::from(1)
+            }
+        };
+        let storage = |i: u8, block: u64| {
+            (0..NUM_SLOTS)
+                .filter(move |slot| i == 0 && !slot_value(*slot, block).is_zero())
+                .map(move |slot| (B256::from(U256::from(slot)), slot_value(slot, block)))
+        };
+        let address = |i: u8| Address::with_last_byte(i);
+        let state_root = |block: u64| {
+            reth_trie::test_utils::state_root((0..NUM_ACCOUNTS).filter_map(|i| {
+                account(i, block).map(|account| (address(i), (account, storage(i, block))))
+            }))
+        };
+        let storage_root =
+            |block: u64| reth_trie::test_utils::storage_root(storage(0, block).collect::<Vec<_>>());
+
+        let factory = create_test_provider_factory();
+        factory.set_storage_settings_cache(StorageSettings::v1());
+
+        let provider_rw = factory.provider_rw().unwrap();
+        let mut rng = generators::rng();
+        for number in 0..=2 {
+            let block = random_block(
+                &mut rng,
+                number,
+                BlockParams { tx_count: Some(0), ..Default::default() },
+            );
+            provider_rw.insert_block(&block.try_recover().unwrap()).unwrap();
+        }
+        provider_rw.save_stage_checkpoint(StageId::Finish, StageCheckpoint::new(2)).unwrap();
+
+        let tx = provider_rw.tx_ref();
+        for i in 0..NUM_ACCOUNTS {
+            let hashed_address = keccak256(address(i));
+            if let Some(account) = account(i, 2) {
+                tx.put::<tables::HashedAccounts>(hashed_address, account).unwrap();
+            }
+            for (slot, value) in storage(i, 2) {
+                tx.put::<tables::HashedStorages>(
+                    hashed_address,
+                    StorageEntry { key: keccak256(slot), value },
+                )
+                .unwrap();
+            }
+            for block in 1..=2 {
+                if account(i, block) != account(i, block - 1) {
+                    tx.put::<tables::AccountChangeSets>(
+                        block,
+                        AccountBeforeTx { address: address(i), info: account(i, block - 1) },
+                    )
+                    .unwrap();
+                }
+                if i != 0 {
+                    continue
+                }
+                for slot in 0..NUM_SLOTS {
+                    let value = slot_value(slot, block - 1);
+                    if value != slot_value(slot, block) {
+                        tx.put::<tables::StorageChangeSets>(
+                            BlockNumberAddress((block, address(i))),
+                            StorageEntry { key: B256::from(U256::from(slot)), value },
+                        )
+                        .unwrap();
+                    }
+                }
+            }
+        }
+
+        let (root, updates) = TestStateRoot::from_tx(tx).root_with_updates().unwrap();
+        assert_eq!(root, state_root(2));
+        provider_rw.write_trie_updates(updates).unwrap();
+        provider_rw.commit().unwrap();
+
+        // Nothing has populated the changeset cache, so the unwind computes the revert itself.
+        let provider_rw = factory.provider_rw().unwrap();
+        provider_rw.unwind_trie_state_from(from).unwrap();
+
+        // With empty prefix sets the roots are built from the stored trie nodes, so they only match
+        // the roots before the unwound range if the unwind restored those nodes.
+        let tx = provider_rw.tx_ref();
+        assert_eq!(
+            TestStorageRoot::from_tx_hashed(tx, keccak256(address(0))).root().unwrap(),
+            storage_root(from - 1)
+        );
+        assert_eq!(TestStateRoot::from_tx(tx).root().unwrap(), state_root(from - 1));
+
+        // A leftover node that no stored parent references does not change the roots, so the
+        // stored tables must also equal the tables built from scratch for that state.
+        type TrieTables = (
+            Vec<(StoredNibbles, reth_trie::BranchNodeCompact)>,
+            Vec<(B256, reth_trie::StorageTrieEntry)>,
+        );
+        fn trie_tables<T: DbTx>(tx: &T) -> TrieTables {
+            let mut accounts = tx.cursor_read::<tables::AccountsTrie>().unwrap();
+            let mut storages = tx.cursor_read::<tables::StoragesTrie>().unwrap();
+            (
+                accounts.walk(None).unwrap().collect::<Result<_, _>>().unwrap(),
+                storages.walk(None).unwrap().collect::<Result<_, _>>().unwrap(),
+            )
+        }
+
+        let unwound = trie_tables(tx);
+        tx.clear::<tables::AccountsTrie>().unwrap();
+        tx.clear::<tables::StoragesTrie>().unwrap();
+        let (_, updates) = TestStateRoot::from_tx(tx).root_with_updates().unwrap();
+        provider_rw.write_trie_updates(updates).unwrap();
+        assert!(unwound == trie_tables(provider_rw.tx_ref()), "unwound trie tables differ");
+    }
+
+    #[test]
+    fn unwind_trie_state_with_cold_changeset_cache() {
+        assert_cold_cache_unwind_restores_trie(1);
+    }
+
+    #[test]
+    fn unwind_tip_trie_state_with_cold_changeset_cache() {
+        assert_cold_cache_unwind_restores_trie(2);
     }
 }

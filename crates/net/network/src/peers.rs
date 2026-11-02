@@ -1,6 +1,7 @@
 //! Peer related implementations
 
 use crate::{
+    cache::LruMap,
     error::SessionError,
     session::{Direction, PendingSessionHandshakeError},
     swarm::NetworkConnectionState,
@@ -10,7 +11,7 @@ use futures::StreamExt;
 
 use reth_eth_wire::{errors::EthStreamError, DisconnectReason};
 use reth_ethereum_forks::ForkId;
-use reth_net_banlist::BanList;
+use reth_net_banlist::{is_global, BanList};
 use reth_network_api::test_utils::{PeerCommand, PeersHandle};
 use reth_network_peers::{NodeRecord, PeerId};
 use reth_network_types::{
@@ -37,6 +38,9 @@ use tokio::{
 };
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{trace, warn};
+
+/// Bound admission-time throttling independently of long-lived security bans.
+const MAX_INCOMING_IP_THROTTLE_ENTRIES: u32 = 16_384;
 
 /// Maintains the state of _all_ the peers known to the network.
 ///
@@ -70,6 +74,8 @@ pub struct PeersManager {
     connection_info: ConnectionInfo,
     /// Tracks unwanted ips/peer ids.
     ban_list: BanList,
+    /// Bounded recent-source throttle, separate from security bans.
+    incoming_ip_throttle: LruMap<IpAddr, std::time::Instant>,
     /// Tracks currently backed off peers.
     backed_off_peers: HashMap<PeerId, std::time::Instant>,
     /// Interval at which to check for peers to unban and release from the backoff map.
@@ -183,6 +189,7 @@ impl PeersManager {
             release_interval: tokio::time::interval_at(now + unban_interval, unban_interval),
             connection_info: ConnectionInfo::new(connection_info),
             ban_list,
+            incoming_ip_throttle: LruMap::new(MAX_INCOMING_IP_THROTTLE_ENTRIES),
             backed_off_peers: Default::default(),
             ban_duration,
             backoff_durations,
@@ -313,7 +320,11 @@ impl PeersManager {
             return Err(InboundConnectionError::IpBanned)
         }
 
-        if self.ban_list.is_banned_ip(&addr) {
+        if self.ban_list.is_banned_ip(&addr) ||
+            self.incoming_ip_throttle
+                .get(&addr)
+                .is_some_and(|until| *until > std::time::Instant::now())
+        {
             return Err(InboundConnectionError::IpBanned)
         }
 
@@ -334,6 +345,9 @@ impl PeersManager {
                 let max_inbound =
                     self.trusted_peer_ids.len().max(self.connection_info.config.max_inbound);
                 if self.connection_info.num_pending_in < max_inbound {
+                    // Rate limit these admissions as well, otherwise a single host could keep
+                    // the pending slots occupied once the inbound slots are taken.
+                    self.throttle_incoming_ip(addr);
                     self.connection_info.inc_pending_in();
                     return Ok(())
                 }
@@ -471,10 +485,14 @@ impl PeersManager {
         self.ban_list.ban_ip_until(ip, std::time::Instant::now() + self.ban_duration);
     }
 
-    /// Bans the IP temporarily to rate limit inbound connection attempts per IP.
+    /// Rate limits recent global sources without allowing the throttle state to grow unbounded.
     fn throttle_incoming_ip(&mut self, ip: IpAddr) {
-        self.ban_list
-            .ban_ip_until(ip, std::time::Instant::now() + self.incoming_ip_throttle_duration);
+        if is_global(&ip) {
+            // Evict the least recently used throttle when full. Security bans are never evicted,
+            // and a new source still gets throttled without blocking unrelated admissions.
+            self.incoming_ip_throttle
+                .insert(ip, std::time::Instant::now() + self.incoming_ip_throttle_duration);
+        }
     }
 
     /// Temporarily puts the peer in timeout by inserting it into the backedoff peers set
@@ -969,15 +987,13 @@ impl PeersManager {
 
     /// Removes the tracked node from the trusted set.
     pub(crate) fn remove_peer_from_trusted_set(&mut self, peer_id: PeerId) {
-        let Entry::Occupied(mut entry) = self.peers.entry(peer_id) else { return };
-        if !entry.get().is_trusted() {
-            return
-        }
-
-        let peer = entry.get_mut();
-        peer.kind = PeerKind::Basic;
-
+        self.trusted_peers_resolver.remove(peer_id);
         self.trusted_peer_ids.remove(&peer_id);
+        if let Some(peer) = self.peers.get_mut(&peer_id) &&
+            peer.is_trusted()
+        {
+            peer.kind = PeerKind::Basic;
+        }
     }
 
     /// Returns the best idle peer to connect to.
@@ -1339,6 +1355,7 @@ impl BackoffReason {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use alloy_primitives::B512;
     use reth_eth_wire::{
         errors::{EthHandshakeError, EthStreamError, P2PHandshakeError, P2PStreamError},
@@ -1361,12 +1378,11 @@ mod tests {
     };
     use url::Host;
 
-    use super::PeersManager;
     use crate::{
         error::SessionError,
         peers::{
             ConnectionInfo, InboundConnectionError, PeerAction, PeerAddr, PeerBackoffDurations,
-            PeerConnectionState,
+            PeerConnectionState, MAX_INCOMING_IP_THROTTLE_ENTRIES,
         },
         session::PendingSessionHandshakeError,
         PeersConfig,
@@ -1961,7 +1977,11 @@ mod tests {
     async fn test_dropped_incoming() {
         let socket_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 0, 1, 2)), 8008);
         let ban_duration = Duration::from_millis(500);
-        let config = PeersConfig { ban_duration, ..PeersConfig::test() };
+        let config = PeersConfig {
+            ban_duration,
+            incoming_ip_throttle_duration: ban_duration,
+            ..PeersConfig::test()
+        };
         let mut peers = PeersManager::new(config);
 
         assert!(peers.on_incoming_pending_session(socket_addr.ip()).is_ok());
@@ -2645,35 +2665,75 @@ mod tests {
 
     #[tokio::test]
     async fn test_incoming_rate_limit() {
-        let config = PeersConfig {
-            incoming_ip_throttle_duration: Duration::from_millis(100),
-            ..PeersConfig::test()
-        };
-        let mut peers = PeersManager::new(config);
+        for max_inbound in [0, 1] {
+            let config = PeersConfig {
+                incoming_ip_throttle_duration: Duration::from_millis(100),
+                ..PeersConfig::test().with_max_inbound(max_inbound)
+            };
+            let mut peers = PeersManager::new(config);
+            peers.add_trusted_peer_id(PeerId::random());
 
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(168, 0, 1, 2)), 8009);
-        assert!(peers.on_incoming_pending_session(addr.ip()).is_ok());
-        assert_eq!(
-            peers.on_incoming_pending_session(addr.ip()).unwrap_err(),
-            InboundConnectionError::IpBanned
-        );
+            let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(168, 0, 1, 2)), 8009);
+            peers.on_incoming_pending_session(addr.ip()).unwrap();
+            peers.on_incoming_pending_session_gracefully_closed();
+            assert_eq!(
+                peers.on_incoming_pending_session(addr.ip()).unwrap_err(),
+                InboundConnectionError::IpBanned
+            );
 
-        peers.release_interval.reset_immediately();
-        tokio::time::sleep(peers.incoming_ip_throttle_duration).await;
+            peers.release_interval.reset_immediately();
+            tokio::time::sleep(peers.incoming_ip_throttle_duration).await;
 
-        // await unban
-        poll_fn(|cx| loop {
-            if peers.poll(cx).is_pending() {
-                return Poll::Ready(());
+            // await unban
+            poll_fn(|cx| loop {
+                if peers.poll(cx).is_pending() {
+                    return Poll::Ready(());
+                }
+            })
+            .await;
+
+            peers.on_incoming_pending_session(addr.ip()).unwrap();
+            peers.on_incoming_pending_session_gracefully_closed();
+            assert_eq!(
+                peers.on_incoming_pending_session(addr.ip()).unwrap_err(),
+                InboundConnectionError::IpBanned
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_incoming_throttle_capacity() {
+        for max_inbound in [0, 1] {
+            let mut peers = PeersManager::new(PeersConfig::test().with_max_inbound(max_inbound));
+            peers.add_trusted_peer_id(PeerId::random());
+            peers.ban_list = BanList::new(
+                [],
+                (0..MAX_INCOMING_IP_THROTTLE_ENTRIES)
+                    .map(|i| IpAddr::V4(Ipv4Addr::from(0x0800_0000 + i))),
+            );
+            for i in 0..MAX_INCOMING_IP_THROTTLE_ENTRIES {
+                peers.throttle_incoming_ip(IpAddr::V4(Ipv4Addr::from(0x0900_0000 + i)));
             }
-        })
-        .await;
+            let ip = IpAddr::from([1, 1, 1, 1]);
+            assert!(peers.on_incoming_pending_session(ip).is_ok());
+            assert_eq!(peers.connection_info.num_pending_in, 1);
+            assert_eq!(
+                peers.incoming_ip_throttle.len(),
+                usize::try_from(MAX_INCOMING_IP_THROTTLE_ENTRIES).unwrap()
+            );
+            peers.on_incoming_pending_session_gracefully_closed();
+            assert_eq!(peers.connection_info.num_pending_in, 0);
+            assert_eq!(
+                peers.on_incoming_pending_session(ip),
+                Err(InboundConnectionError::IpBanned)
+            );
 
-        assert!(peers.on_incoming_pending_session(addr.ip()).is_ok());
-        assert_eq!(
-            peers.on_incoming_pending_session(addr.ip()).unwrap_err(),
-            InboundConnectionError::IpBanned
-        );
+            // A saturated throttle table must not weaken existing security bans.
+            assert_eq!(
+                peers.on_incoming_pending_session(IpAddr::from([8, 0, 0, 1])),
+                Err(InboundConnectionError::IpBanned)
+            );
+        }
     }
 
     #[tokio::test]
@@ -3307,5 +3367,28 @@ mod tests {
 
         let (best_id, _) = peers.best_unconnected().unwrap();
         assert_eq!(best_id, with_fork, "fork_id should break tie when reputation is equal");
+    }
+
+    #[tokio::test]
+    async fn test_revoke_trust_independent_of_peer_kind() {
+        for kind in [None, Some(PeerKind::Basic), Some(PeerKind::Static), Some(PeerKind::Trusted)] {
+            let mut peers = PeersManager::new(PeersConfig::test());
+            let peer_id = PeerId::random();
+            peers.add_trusted_peer_id(peer_id);
+            if let Some(kind) = kind {
+                peers.add_peer_kind(
+                    peer_id,
+                    Some(kind),
+                    PeerAddr::from_tcp("127.0.0.1:8008".parse().unwrap()),
+                    None,
+                );
+            }
+            peers.remove_peer_from_trusted_set(peer_id);
+            assert!(!peers.trusted_peer_ids.contains(&peer_id));
+            assert_eq!(
+                peers.peers.get(&peer_id).map(|peer| peer.kind),
+                kind.map(|kind| if kind == PeerKind::Trusted { PeerKind::Basic } else { kind })
+            );
+        }
     }
 }

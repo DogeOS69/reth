@@ -55,3 +55,78 @@ This branch is based on Reth `eb4c15e5e36d8776d46629beae4c0a69af7ab04f` (`v2.0.0
   old code.
 - **Removal condition:** remove the backport when the selected upstream Reth base contains PR
   #23561. Drop the added test with it, or keep it if upstream still lacks one.
+
+## Syncing subscription close
+
+- **Scope:** `reth-rpc` `eth_subscribe("syncing")` task.
+- **Source:** exact backport of upstream Reth commit `d85d9deaef3b63161a339e2049f1917574eb1d2a`
+  (PR #27455).
+- **Purpose:** end the syncing subscription task when its sink closes (unsubscribe or disconnect).
+  The task only sends when the sync status changes, so on a synced node it previously never noticed
+  a closed sink and lived forever, holding a canonical-state receiver.
+- **Compatibility:** none beyond upstream; the diff matches upstream line for line.
+- **Removal condition:** remove the backport when the selected upstream Reth base contains PR
+  #27455.
+
+## Pending inbound throttle at capacity
+
+- **Scope:** `reth-network` `PeersManager` inbound admission.
+- **Source:** exact backport of upstream Reth commit `bc98f383d23c68ccd3b9f067ba199e825eae737f`
+  (PR #27842).
+- **Purpose:** when the inbound slots are full and trusted peer ids are configured, pending inbound
+  connections admitted for possible trusted peers are now IP-throttled too, so one host can no
+  longer hold every pending slot. Throttle entries move to a bounded LRU separate from security
+  bans and only apply to global IPs.
+- **Compatibility:** none beyond upstream; the diff matches upstream line for line.
+- **Removal condition:** remove the backport when the selected upstream Reth base contains PR
+  #27842.
+
+## P2P ping validation and pacing
+
+- **Scope:** `reth-eth-wire` `P2PStream` Ping/Pong handling, and the matching `reth-network` error
+  classification.
+- **Source:** backport of upstream Reth commits `20fab813c08ab9f5c7f7a2db1d3c304d717fe46c`
+  (PR #26698) and `ae81966b68e71028b9efeead3e4a9bcb38ffe049` (PR #26702).
+- **Purpose:** reject Ping/Pong frames whose payload is not the 1-byte empty list before
+  decompressing them, and limit incoming pings to a burst of 5 refilled at one per second. A peer
+  that floods pings without reading can no longer grow the unbounded outgoing Pong queue.
+- **Compatibility:** the production code matches upstream exactly; `P2PStream::new` lacks the
+  upstream `compress_scratch` field, which comes from a later perf commit. The upstream tests rely
+  on test helpers from later perf commits (`FlushCountingTransport`, `compress_frame`,
+  `SNAPPY_PING_MESSAGE`/`SNAPPY_PONG_MESSAGE`). They run on a minimal `IncomingFramesTransport`,
+  build compressed frames with the Snappy encoder directly instead of `compress_frame`, and use the
+  byte-identical `P2PMessage::{Ping, Pong}` encodings instead of the constants. The two upstream
+  flush-batching tests that cover those perf commits are omitted. The branch adds
+  `test_invalid_ping_pong_payload_is_protocol_breach` in `reth-network`, which upstream's tests
+  check only for `TooManyPings`.
+- **Removal condition:** remove the backport when the selected upstream Reth base contains PRs
+  #26698 and #26702.
+
+## RLPx Hello identity check
+
+- **Scope:** `reth-network` session handshake (`authenticate_stream`).
+- **Source:** backport of upstream Reth commit `1c6945c561d37a79857c97ee65c77338223ef639`
+  (PR #26639).
+- **Purpose:** bind every session to the node id the ECIES handshake authenticated. A remote whose
+  `Hello` announces a different node id is disconnected with `UnexpectedHandshakeIdentity`, so it
+  cannot take over a trusted peer's id, its peer record, or its extra-protocol (scroll-wire)
+  connection.
+- **Compatibility:** the production code matches upstream exactly. The upstream session tests pass a
+  max message size to the pending-session functions (PR #22668), which this branch does not carry;
+  that argument is dropped from the tests.
+- **Removal condition:** remove the backport when the selected upstream Reth base contains PR
+  #26639.
+
+## Trusted peer revocation
+
+- **Scope:** `reth-network` trusted peer set and trusted peer resolver.
+- **Source:** exact backport of upstream Reth commit
+  `b05e68db85fb29c4eaa707728171acb0fd0cd23d` (PR #24406), and a focused backport of upstream Reth
+  commit `f9858796a53be55d5861b13e0eb6b22d8af85f9e` (PR #27948).
+- **Purpose:** removing a trusted peer always drops its id from the trusted set and the resolver,
+  even when the peer has no record or a non-trusted record, so a revoked peer no longer passes the
+  `--trusted-only` admission check.
+- **Compatibility:** the function body matches upstream. The upstream test's admin ban assertions
+  are omitted because this branch does not carry PR #25140 (`admin` ban and unban methods).
+- **Removal condition:** remove the backport when the selected upstream Reth base contains PRs
+  #24406 and #27948.

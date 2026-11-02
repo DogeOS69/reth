@@ -42,6 +42,24 @@ This branch is based on Reth `eb4c15e5e36d8776d46629beae4c0a69af7ab04f` (`v2.0.0
 - **Removal condition:** remove the backport when the selected upstream Reth base contains PR
   #26644 or equivalent EIP-3607 empty-code handling.
 
+## Stale persisted forkchoice head
+
+- **Scope:** `reth-engine-tree` `EngineApiTreeHandler::find_canonical_header`.
+- **Source:** focused backport of upstream Reth commit `444e867155c2a7a4c028e479ca7201b0b6871579`
+  (PR #27429).
+- **Purpose:** a header found on disk by hash is only treated as canonical if it is not above the
+  in-memory canonical head and matches the canonical hash at its height. Reorged-out blocks stay on
+  disk until persistence removes them, so an FCU to such a hash could otherwise be treated as
+  already canonical and skip making it the head again.
+- **Compatibility:** `find_canonical_header` and the two engine tree unit tests match upstream.
+  Dropped: the `is_consistent_forkchoice_state` hunk (that function comes from PR #27247, not on
+  this branch) and the end-to-end tests in `crates/ethereum/node/tests/e2e/forkchoice.rs` (file and
+  e2e setup hooks not on this branch). The branch adds
+  `test_fcu_rejects_reorged_out_safe_and_finalized_with_pending_disk_reorg`: the same check now
+  makes a reorged-out safe or finalized hash an invalid forkchoice state instead of being accepted.
+- **Removal condition:** remove the backport when the selected upstream Reth base contains PR
+  #27429.
+
 ## RPC blocking IO bounds
 
 - **Scope:** `reth-rpc-eth-api` blocking task helpers, `eth_call`, `eth_simulateV1`,

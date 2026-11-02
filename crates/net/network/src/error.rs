@@ -216,13 +216,15 @@ impl SessionError for EthStreamError {
                 P2PStreamError::HandshakeError(P2PHandshakeError::NoResponse) |
                 P2PStreamError::PingTimeout,
             ) => Some(BackoffKind::Low),
-            // malformed messages
+            // malformed or abusive messages
             Self::P2PStreamError(
                 P2PStreamError::Rlp(_) |
                 P2PStreamError::UnknownReservedMessageId(_) |
                 P2PStreamError::UnknownDisconnectReason(_) |
                 P2PStreamError::MessageTooBig { .. } |
                 P2PStreamError::EmptyProtocolMessage |
+                P2PStreamError::InvalidPingPongPayload(_) |
+                P2PStreamError::TooManyPings |
                 P2PStreamError::PingerError(_) |
                 P2PStreamError::Snap(_),
             ) => Some(BackoffKind::Medium),
@@ -251,6 +253,9 @@ impl SessionError for PendingSessionHandshakeError {
                     ECIESErrorImpl::Secp256k1(_) |
                     ECIESErrorImpl::InvalidHandshake { .. }
             ),
+            // A peer that announces someone else's node id is broken or hostile, and its discovery
+            // record cannot be trusted to point at a usable peer.
+            Self::UnexpectedHandshakeIdentity(_) => true,
             Self::Timeout | Self::UnsupportedExtraCapability => false,
         }
     }
@@ -270,7 +275,7 @@ impl SessionError for PendingSessionHandshakeError {
                     ECIESErrorImpl::InvalidHandshake { .. }
             ),
             Self::Timeout => false,
-            Self::UnsupportedExtraCapability => true,
+            Self::UnsupportedExtraCapability | Self::UnexpectedHandshakeIdentity(_) => true,
         }
     }
 
@@ -279,7 +284,9 @@ impl SessionError for PendingSessionHandshakeError {
             Self::Eth(eth) => eth.should_backoff(),
             Self::Ecies(_) => Some(BackoffKind::Low),
             Self::Timeout => Some(BackoffKind::Medium),
-            Self::UnsupportedExtraCapability => Some(BackoffKind::High),
+            Self::UnsupportedExtraCapability | Self::UnexpectedHandshakeIdentity(_) => {
+                Some(BackoffKind::High)
+            }
         }
     }
 }
@@ -337,6 +344,21 @@ mod tests {
             P2PHandshakeError::NoResponse,
         ));
         assert_eq!(err.should_backoff(), Some(BackoffKind::Low));
+
+        let err = EthStreamError::P2PStreamError(P2PStreamError::InvalidPingPongPayload(0x02));
+        assert_eq!(err.should_backoff(), Some(BackoffKind::Medium));
+
+        let err = EthStreamError::P2PStreamError(P2PStreamError::TooManyPings);
+        assert!(err.is_protocol_breach());
+        assert_eq!(err.should_backoff(), Some(BackoffKind::Medium));
+    }
+
+    /// A malformed Ping or Pong is a protocol breach, so an active session is disconnected with a
+    /// reputation penalty instead of only being closed.
+    #[test]
+    fn test_invalid_ping_pong_payload_is_protocol_breach() {
+        let err = EthStreamError::P2PStreamError(P2PStreamError::InvalidPingPongPayload(0x02));
+        assert!(err.is_protocol_breach());
     }
 
     #[test]

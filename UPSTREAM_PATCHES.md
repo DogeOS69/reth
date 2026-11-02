@@ -208,7 +208,7 @@ This branch is based on Reth `eb4c15e5e36d8776d46629beae4c0a69af7ab04f` (`v2.0.0
   `3a83ccc546bca3a90eb492fc0d115e6065aecb1a` (PR #26654).
 - **Purpose:** bound the queues between the RLPx connection and its protocols. The outbound mux
   buffer gets a soft byte cap and polls protocols in turn (#25031). Each inbound protocol queue,
-  primary (eth) and satellite (scroll-wire) alike, is bounded by message count and bytes, with a
+  primary (eth) and satellite alike, is bounded by message count and bytes, with a
   shared per-connection byte budget, both during the eth `Status` handshake and after it; the
   handshake loop polls the handshake and satellites before reading more frames, and yields every
   32 frames (#26660). A full queue ends the session with `SubprotocolInboundBufferFull`. Message IDs
@@ -220,9 +220,9 @@ This branch is based on Reth `eb4c15e5e36d8776d46629beae4c0a69af7ab04f` (`v2.0.0
   budget uses `AtomicUsize::fetch_update` in place of `try_update` (Rust 1.95; this branch and its
   downstream builds use 1.93), and its two `P2PStream` tests use a local frame helper and the
   existing `IncomingFramesTransport` because `compress_frame` comes from a later perf commit.
-  `ConnectionHandler::inbound_limits` has a default, so the scroll-wire handler keeps compiling and
-  gets the default limits (1,024 messages, 32 MiB). The branch adds
-  `pre_status_scroll_wire_queue_is_bounded_by_default_limits`, which upstream's tests do not cover
+  `ConnectionHandler::inbound_limits` has a default, so existing satellite protocol handlers keep
+  compiling and get the default limits (1,024 messages, 32 MiB). The branch adds
+  `pre_status_satellite_queue_is_bounded_by_default_limits`, which upstream's tests do not cover
   with the real eth handshake.
 - **Removal condition:** remove the backport when the selected upstream Reth base contains PRs
   #25031, #26654 and #26660.

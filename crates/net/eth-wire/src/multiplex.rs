@@ -1439,27 +1439,28 @@ mod tests {
         assert!(stream.is_ok());
     }
 
-    /// A peer that negotiates eth and the scroll-wire capability but withholds its eth `Status`
+    /// A peer that negotiates eth and a satellite capability but withholds its eth `Status`
     /// cannot grow the queue of a satellite that is not draining it: the eth handshake fails once
     /// the default message or byte budget is exhausted.
     #[tokio::test]
-    async fn pre_status_scroll_wire_queue_is_bounded_by_default_limits() {
+    async fn pre_status_satellite_queue_is_bounded_by_default_limits() {
         async fn flood_before_status(payload: &[u8], frame_count: usize) {
-            let scroll = Capability::new_static("scroll", 1);
+            let satellite = Capability::new_static("satellite", 1);
             let shared_capabilities = SharedCapabilities::try_new(
-                vec![EthVersion::Eth68.into(), Protocol::new(scroll.clone(), 1)],
-                vec![Capability::eth(EthVersion::Eth68), scroll.clone()],
+                vec![EthVersion::Eth68.into(), Protocol::new(satellite.clone(), 1)],
+                vec![Capability::eth(EthVersion::Eth68), satellite.clone()],
             )
             .unwrap();
-            let scroll_offset = shared_capabilities.find(&scroll).unwrap().message_id_offset();
+            let satellite_offset =
+                shared_capabilities.find(&satellite).unwrap().message_id_offset();
             let frames =
-                (0..frame_count).map(|_| compressed_frame(scroll_offset, payload)).collect();
+                (0..frame_count).map(|_| compressed_frame(satellite_offset, payload)).collect();
             let conn = P2PStream::new(
                 InboundFramesTransport { frames, writable: AtomicBool::new(true) },
                 shared_capabilities,
             );
             let mut mux = RlpxProtocolMultiplexer::new(conn);
-            mux.install_protocol(&scroll, |conn| HoldingProtocol { _conn: conn }).unwrap();
+            mux.install_protocol(&satellite, |conn| HoldingProtocol { _conn: conn }).unwrap();
 
             let (_, fork_filter) = eth_handshake();
             let mut handshake = pin!(mux.into_eth_satellite_stream::<EthNetworkPrimitives>(
@@ -1477,7 +1478,7 @@ mod tests {
             else {
                 panic!("unexpected handshake error: {err:?}")
             };
-            assert_eq!(*capability, scroll);
+            assert_eq!(*capability, satellite);
         }
 
         // Message budget: tiny frames stop at the default per-protocol message limit.

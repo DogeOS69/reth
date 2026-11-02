@@ -906,4 +906,33 @@ mod tests {
             "all: no percentiles were requested, so there should be no rewards result"
         );
     }
+
+    /// A blocking IO future whose caller has gone must be dropped at its next yield, so the permit
+    /// it holds is released instead of being held until the work completes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_spawn_blocking_io_fut_drops_cancelled_future() {
+        use reth_rpc_eth_api::helpers::SpawnBlocking;
+        use std::time::Duration;
+
+        let eth_api = build_test_eth_api(MockEthProvider::default());
+        let guard = eth_api.blocking_io_task_guard().clone();
+        let total = guard.available_permits();
+
+        let permit = eth_api.acquire_owned_blocking_io().await.unwrap();
+        let request = eth_api.spawn_blocking_io_fut(move |_| async move {
+            let _permit = permit;
+            std::future::pending::<Result<(), _>>().await
+        });
+        assert_eq!(guard.available_permits(), total - 1);
+
+        drop(request);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while guard.available_permits() != total {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the cancelled future still holds its permit"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
 }

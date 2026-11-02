@@ -223,7 +223,6 @@ This branch is based on Reth `eb4c15e5e36d8776d46629beae4c0a69af7ab04f` (`v2.0.0
   `ConnectionHandler::inbound_limits` has a default, so the scroll-wire handler keeps compiling and
   gets the default limits (1,024 messages, 32 MiB). The branch adds
   `pre_status_scroll_wire_queue_is_bounded_by_default_limits`, which upstream's tests do not cover
-  with the real eth handshake. The branch is stacked on the RLPx Hello identity check and P2P ping
-  validation and pacing backports.
+  with the real eth handshake.
 - **Removal condition:** remove the backport when the selected upstream Reth base contains PRs
   #25031, #26654 and #26660.

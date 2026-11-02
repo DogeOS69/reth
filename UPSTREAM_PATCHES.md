@@ -62,3 +62,32 @@ This branch is based on Reth `eb4c15e5e36d8776d46629beae4c0a69af7ab04f` (`v2.0.0
   check only for `TooManyPings`.
 - **Removal condition:** remove the backport when the selected upstream Reth base contains PRs
   #26698 and #26702.
+
+## RLPx Hello identity check
+
+- **Scope:** `reth-network` session handshake (`authenticate_stream`).
+- **Source:** backport of upstream Reth commit `1c6945c561d37a79857c97ee65c77338223ef639`
+  (PR #26639).
+- **Purpose:** bind every session to the node id the ECIES handshake authenticated. A remote whose
+  `Hello` announces a different node id is disconnected with `UnexpectedHandshakeIdentity`, so it
+  cannot take over a trusted peer's id, its peer record, or its extra-protocol (scroll-wire)
+  connection.
+- **Compatibility:** the production code matches upstream exactly. The upstream session tests pass a
+  max message size to the pending-session functions (PR #22668), which this branch does not carry;
+  that argument is dropped from the tests.
+- **Removal condition:** remove the backport when the selected upstream Reth base contains PR
+  #26639.
+
+## Trusted peer revocation
+
+- **Scope:** `reth-network` trusted peer set and trusted peer resolver.
+- **Source:** exact backport of upstream Reth commit
+  `b05e68db85fb29c4eaa707728171acb0fd0cd23d` (PR #24406), and a focused backport of upstream Reth
+  commit `f9858796a53be55d5861b13e0eb6b22d8af85f9e` (PR #27948).
+- **Purpose:** removing a trusted peer always drops its id from the trusted set and the resolver,
+  even when the peer has no record or a non-trusted record, so a revoked peer no longer passes the
+  `--trusted-only` admission check.
+- **Compatibility:** the function body matches upstream. The upstream test's admin ban assertions
+  are omitted because this branch does not carry PR #25140 (`admin` ban and unban methods).
+- **Removal condition:** remove the backport when the selected upstream Reth base contains PRs
+  #24406 and #27948.

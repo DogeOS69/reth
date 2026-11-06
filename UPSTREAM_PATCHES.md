@@ -226,3 +226,18 @@ This branch is based on Reth `eb4c15e5e36d8776d46629beae4c0a69af7ab04f` (`v2.0.0
   with the real eth handshake.
 - **Removal condition:** remove the backport when the selected upstream Reth base contains PRs
   #25031, #26654 and #26660.
+
+## Trie iterator seek boundary
+
+- **Scope:** `reth-trie` `TrieNodeIter::try_next` (`crates/trie/trie/src/node_iter.rs`).
+- **Source:** cherry-pick of upstream Reth commit `8572c88fe04fb2213d86f020ed9e72e612abb097`
+  (PR #28264), authorship kept.
+- **Purpose:** the iterator skipped the hashed-cursor seek whenever the walker's next key started
+  with the seek prefix. With a deeper stored branch, hashed leaves between the seek prefix and that
+  key were never visited, so an incremental state or storage root (legacy `StateRoot`,
+  `StorageRoot`, `ParallelStateRoot`, proofs) dropped them. The seek is now skipped only at the
+  exact prefix.
+- **Compatibility:** matches upstream except for the test: `HashedStorage::from_iter` takes a
+  leading `wiped` flag on this branch, and `B256` already comes from `use super::*`.
+- **Removal condition:** remove the backport when the selected upstream Reth base contains PR
+  #28264.

@@ -956,9 +956,6 @@ where
             self.wait_for_pending_persistence().map_err(ProviderError::other)?;
         }
 
-        // Update tree state with the new canonical head
-        self.state.tree_state.set_canonical_head(canonical_header.num_hash());
-
         // Handle the state update based on whether this is an unwind scenario
         if new_head_number < current_head_number {
             debug!(
@@ -1001,11 +998,17 @@ where
         let old_blocks =
             self.collect_blocks_for_canonical_unwind(new_head_number, current_head_number);
         let executed_block = self.canonical_block_by_hash(canonical_header.hash())?;
+        let remove_above = self.find_disk_reorg_for_head(canonical_header.num_hash())?;
+
+        // Preparation reads must succeed before changing the head: the next persistence
+        // advance would otherwise truncate disk to a head that failed to load. Completion
+        // handling needs the proposed head to be installed before removal starts.
+        self.state.tree_state.set_canonical_head(canonical_header.num_hash());
 
         // Do not publish the new head, acknowledge the rewind or start a payload job while
         // disk still contains the old branch. Historical state providers read its changesets
         // through mmap; truncating those files underneath a new reader invalidates its reads.
-        if let Some(new_tip_num) = self.find_disk_reorg()? {
+        if let Some(new_tip_num) = remove_above {
             self.remove_blocks(new_tip_num);
         }
         self.wait_for_pending_persistence().map_err(ProviderError::other)?;
@@ -1074,11 +1077,13 @@ where
 
     /// Handles chain advance or same height scenarios.
     fn handle_chain_advance_or_same_height(
-        &self,
+        &mut self,
         canonical_header: &SealedHeader<N::BlockHeader>,
     ) -> ProviderResult<()> {
         // Load the block into memory if it's not already present
         self.ensure_block_in_memory(canonical_header.number(), canonical_header.hash())?;
+
+        self.state.tree_state.set_canonical_head(canonical_header.num_hash());
 
         // Update the canonical head header
         self.canonical_in_memory_state.set_canonical_head(canonical_header.clone());
@@ -2587,7 +2592,11 @@ where
     /// This method tries to detect whether on-disk and in-memory states have diverged. It might
     /// happen if a reorg is happening while we are persisting a block.
     fn find_disk_reorg(&self) -> ProviderResult<Option<u64>> {
-        let mut canonical = self.state.tree_state.current_canonical_head;
+        self.find_disk_reorg_for_head(self.state.tree_state.current_canonical_head)
+    }
+
+    /// Detects a disk reorg for a proposed head without changing the tracked canonical head.
+    fn find_disk_reorg_for_head(&self, mut canonical: NumHash) -> ProviderResult<Option<u64>> {
         let mut persisted = self.persistence_state.last_persisted_block;
 
         let parent_num_hash = |num_hash: NumHash| -> ProviderResult<NumHash> {

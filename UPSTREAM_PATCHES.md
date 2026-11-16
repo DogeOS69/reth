@@ -260,3 +260,27 @@ This branch is based on Reth `eb4c15e5e36d8776d46629beae4c0a69af7ab04f` (`v2.0.0
   leading `wiped` flag on this branch, and `B256` already comes from `use super::*`.
 - **Removal condition:** remove the backport when the selected upstream Reth base contains PR
   #28264.
+
+## Canonical ancestor head preparation
+
+- **Scope:** `reth-engine-tree` canonical ancestor rewinds and advance/same-height loading.
+- **Source:** local fix on the DogeOS base; independent of PR #23 and upstream PR #27247.
+- **Purpose:** reconstruct the ancestor and compute the disk reorg against an explicit proposed
+  head before changing the tree head. After draining pending persistence, preparation failures
+  do not publish the proposed head or trigger removal for that failed rewind, including when
+  the engine loop subsequently advances persistence. Draining an earlier save can still update
+  persistence state and evict persisted blocks. Advance/same-height loading also completes before
+  the tree head changes.
+- **Ordering and boundary:** retain the initial wait for pending persistence. After preparation
+  succeeds, set the tree head before issuing disk removal or processing its completion; publish
+  the canonical in-memory update only after removal completes. This is not a transaction across
+  persistence: failures after removal has been issued retain the existing failure behavior and
+  cannot roll back that deletion. Safe/finalized ancestor marker semantics and the persistence
+  service are unchanged.
+- **Validation:** real FCU regressions cover ancestor reconstruction failure (an unavailable
+  executed block with a valid canonical header) and missing disk-reorg
+  headers, the subsequent persistence step, unchanged memory state and retry after restoring
+  the fixture; direct tests cover advance/same-height load failures. The existing disk-wait test
+  continues to require removal completion before VALID or payload building.
+- **Removal condition:** remove when the selected upstream base provides equivalent preparation
+  ordering and regression coverage.

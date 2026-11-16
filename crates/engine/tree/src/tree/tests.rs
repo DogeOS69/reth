@@ -1192,6 +1192,219 @@ async fn test_fcu_with_canonical_ancestor_updates_latest_block() {
     );
 }
 
+#[tokio::test]
+async fn canonical_rewind_reconstruction_failure_preserves_head() {
+    canonical_rewind_preparation_failure_preserves_head(false).await;
+}
+
+#[tokio::test]
+async fn canonical_rewind_disk_header_failure_preserves_head() {
+    canonical_rewind_preparation_failure_preserves_head(true).await;
+}
+
+/// Exercise preparation failures through FCU and the subsequent persistence step of the loop.
+async fn canonical_rewind_preparation_failure_preserves_head(missing_disk_header: bool) {
+    for build_payload in [false, true] {
+        let mut harness = TestHarness::new(MAINNET.clone());
+        let blocks: Vec<_> = harness.block_builder.get_executed_blocks(1..5).collect();
+        harness = harness.with_blocks(blocks.clone());
+        harness.tree.engine_kind = EngineApiKind::OpStack;
+        harness.tree.config = harness.tree.config.clone().with_unwind_canonical_header(true);
+        let old_head = blocks[3].recovered_block().num_hash();
+        let ancestor = blocks[1].recovered_block().clone_sealed_header();
+        harness.tree.persistence_state.last_persisted_block = old_head;
+        let canonical = harness.tree.canonical_in_memory_state.clone();
+        canonical.set_safe(blocks[1].recovered_block().clone_sealed_header());
+        canonical.set_finalized(blocks[0].recovered_block().clone_sealed_header());
+        let old_safe = canonical.get_safe_num_hash();
+        let old_finalized = canonical.get_finalized_num_hash();
+        let old_pending = canonical.pending_block_num_hash();
+        let mut notifications = canonical.subscribe_canon_state();
+        let safe_notifications = canonical.subscribe_safe_block();
+        let finalized_notifications = canonical.subscribe_finalized_block();
+        let states: Vec<_> = blocks
+            .iter()
+            .map(|b| canonical.state_by_hash(b.recovered_block().hash()).unwrap())
+            .collect();
+        let missing = if missing_disk_header { &blocks[2] } else { &blocks[1] };
+        let missing_hash = missing.recovered_block().hash();
+        harness.tree.state.tree_state.blocks_by_hash.remove(&missing_hash).unwrap();
+        if missing_disk_header {
+            harness.provider.headers.lock().remove(&missing_hash).unwrap();
+            assert!(harness.tree.canonical_block_by_hash(ancestor.hash()).is_ok());
+        } else {
+            // The block/header remain on disk, but MockEthProvider cannot return a
+            // recovered block (sealed_block_with_senders returns None).
+            assert_matches!(
+                harness.tree.canonical_block_by_hash(ancestor.hash()),
+                Err(ProviderError::HeaderNotFound(_))
+            );
+        }
+        assert_eq!(
+            harness.tree.find_canonical_header(ancestor.hash()).unwrap(),
+            Some(ancestor.clone())
+        );
+        let tree_hashes: B256Set =
+            harness.tree.state.tree_state.blocks_by_hash.keys().copied().collect();
+        let tree_numbers: BTreeMap<_, Vec<_>> = harness
+            .tree
+            .state
+            .tree_state
+            .blocks_by_number
+            .iter()
+            .map(|(number, blocks)| {
+                (*number, blocks.iter().map(|b| b.recovered_block().hash()).collect())
+            })
+            .collect();
+        let tree_children = harness.tree.state.tree_state.parent_to_child.clone();
+        let (payload_tx, mut payload_rx) = unbounded_channel();
+        harness.tree.payload_builder = PayloadBuilderHandle::new(payload_tx);
+        let (tx, rx) = oneshot::channel();
+        assert_matches!(
+            harness
+                .tree
+                .on_engine_message(FromEngine::Request(
+                    BeaconEngineMessage::ForkchoiceUpdated {
+                        state: ForkchoiceState {
+                            head_block_hash: ancestor.hash(),
+                            safe_block_hash: B256::ZERO,
+                            finalized_block_hash: B256::ZERO,
+                        },
+                        payload_attrs: build_payload.then(|| {
+                            alloy_rpc_types_engine::PayloadAttributes {
+                                timestamp: ancestor.timestamp() + 1,
+                                ..Default::default()
+                            }
+                        }),
+                        tx,
+                    }
+                    .into(),
+                ))
+                .unwrap(),
+            ops::ControlFlow::Continue(())
+        );
+        assert!(rx.await.unwrap().is_err());
+
+        // A failed FCU still reaches this step in the engine loop. An early head change
+        // would either start deleting the old branch or fail another header lookup here.
+        let advance = harness.tree.advance_persistence();
+        assert_matches!(harness.action_rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+        advance.unwrap();
+        assert!(!harness.tree.persistence_state.in_progress());
+        assert_eq!(harness.tree.persistence_state.last_persisted_block, old_head);
+        assert_eq!(harness.tree.state.tree_state.current_canonical_head, old_head);
+        assert_eq!(canonical.get_canonical_head().num_hash(), old_head);
+        assert_eq!(canonical.get_safe_num_hash(), old_safe);
+        assert_eq!(canonical.get_finalized_num_hash(), old_finalized);
+        assert_eq!(canonical.pending_block_num_hash(), old_pending);
+        assert_eq!(
+            harness.tree.state.tree_state.blocks_by_hash.keys().copied().collect::<B256Set>(),
+            tree_hashes
+        );
+        assert_eq!(harness.tree.state.tree_state.parent_to_child, tree_children);
+        for (number, hashes) in tree_numbers {
+            assert_eq!(
+                harness.tree.state.tree_state.blocks_by_number[&number]
+                    .iter()
+                    .map(|b| b.recovered_block().hash())
+                    .collect::<Vec<_>>(),
+                hashes
+            );
+        }
+        for state in states {
+            let block = state.block_ref().recovered_block();
+            assert_eq!(canonical.hash_by_number(block.number()), Some(block.hash()));
+            assert!(Arc::ptr_eq(&canonical.state_by_hash(block.hash()).unwrap(), &state));
+            assert!(Arc::ptr_eq(&canonical.state_by_number(block.number()).unwrap(), &state));
+        }
+        assert!(!safe_notifications.has_changed().unwrap());
+        assert!(!finalized_notifications.has_changed().unwrap());
+        assert_matches!(
+            notifications.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        );
+        assert_matches!(payload_rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty));
+        assert_matches!(
+            harness.from_tree_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        );
+
+        // Restore the missing cache/header and retry the same FCU successfully.
+        harness.tree.state.tree_state.blocks_by_hash.insert(missing_hash, missing.clone());
+        if missing_disk_header {
+            harness.provider.add_header(missing_hash, missing.recovered_block().header().clone());
+        }
+        let (tx, rx) = oneshot::channel();
+        let ancestor_num_hash = ancestor.num_hash();
+        let mut tree = harness.tree;
+        let worker = std::thread::spawn(move || {
+            let _ = tree
+                .on_engine_message(FromEngine::Request(
+                    BeaconEngineMessage::ForkchoiceUpdated {
+                        state: ForkchoiceState {
+                            head_block_hash: ancestor_num_hash.hash,
+                            safe_block_hash: B256::ZERO,
+                            finalized_block_hash: B256::ZERO,
+                        },
+                        payload_attrs: None,
+                        tx,
+                    }
+                    .into(),
+                ))
+                .unwrap();
+            tree
+        });
+        let PersistenceAction::RemoveBlocksAbove(number, completion) =
+            harness.action_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+        else {
+            panic!("expected retry to unwind disk");
+        };
+        assert_eq!(number, ancestor.number());
+        completion
+            .send(PersistenceResult { last_block: Some(ancestor_num_hash), commit_duration: None })
+            .unwrap();
+        let tree = worker.join().unwrap();
+        assert!(rx.await.unwrap().unwrap().await.unwrap().payload_status.is_valid());
+        assert_eq!(tree.state.tree_state.current_canonical_head, ancestor_num_hash);
+        assert_eq!(canonical.get_canonical_head().num_hash(), ancestor_num_hash);
+        assert_eq!(tree.persistence_state.last_persisted_block, ancestor_num_hash);
+    }
+}
+
+#[tokio::test]
+async fn canonical_advance_or_same_height_load_failure_preserves_head() {
+    // FCU normally handles these heights elsewhere, so exercise the private dispatcher directly.
+    for advance in [false, true] {
+        let mut harness = TestHarness::new(MAINNET.clone());
+        let blocks: Vec<_> = harness.block_builder.get_executed_blocks(1..3).collect();
+        harness = harness.with_blocks(blocks.clone());
+        let old_head = blocks[0].recovered_block().clone_sealed_header();
+        harness.tree.state.tree_state.set_canonical_head(old_head.num_hash());
+        harness.tree.canonical_in_memory_state =
+            CanonicalInMemoryState::with_head(old_head.clone(), None, None);
+        let mut target = blocks[usize::from(advance)].recovered_block().clone_sealed_header();
+        if !advance {
+            // A distinct hash at the same height makes an accidental head update observable.
+            let mut header = target.unseal();
+            header.extra_data = Bytes::from_static(b"same-height");
+            target = SealedHeader::seal_slow(header);
+            harness.provider.add_block(
+                target.hash(),
+                Block { header: target.clone().unseal(), ..Default::default() },
+            );
+        }
+        harness.tree.state.tree_state.blocks_by_hash.remove(&target.hash());
+        assert_matches!(
+            harness.tree.update_latest_block_to_canonical_ancestor(&target),
+            Err(ProviderError::HeaderNotFound(_))
+        );
+        assert_eq!(harness.tree.state.tree_state.current_canonical_head, old_head.num_hash());
+        assert_eq!(harness.tree.canonical_in_memory_state.get_canonical_head(), old_head);
+        assert!(harness.tree.canonical_in_memory_state.state_by_number(target.number()).is_none());
+        assert_matches!(harness.action_rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
+    }
+}
+
 /// A persisted canonical rewind must complete before the caller or payload builder can use it.
 #[tokio::test]
 async fn canonical_rewind_waits_for_disk_before_acknowledging_or_building() {

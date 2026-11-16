@@ -69,13 +69,32 @@ This branch is based on Reth `eb4c15e5e36d8776d46629beae4c0a69af7ab04f` (`v2.0.0
   disk until persistence removes them, so an FCU to such a hash could otherwise be treated as
   already canonical and skip making it the head again.
 - **Compatibility:** `find_canonical_header` and the two engine tree unit tests match upstream.
-  Dropped: the `is_consistent_forkchoice_state` hunk (that function comes from PR #27247, not on
-  this branch) and the end-to-end tests in `crates/ethereum/node/tests/e2e/forkchoice.rs` (file and
-  e2e setup hooks not on this branch). The branch adds
+  The `is_consistent_forkchoice_state` hunk is included with the PR #27247 backport below, reusing
+  this canonical-header check. The e2e setup hooks are available on this branch; PR #27247 adds
+  `crates/ethereum/node/tests/e2e/forkchoice.rs`, while PR #27429's additional e2e tests remain
+  outside this focused backport. The branch adds
   `test_fcu_rejects_reorged_out_safe_and_finalized_with_pending_disk_reorg`: the same check now
   makes a reorged-out safe or finalized hash an invalid forkchoice state instead of being accepted.
 - **Removal condition:** remove the backport when the selected upstream Reth base contains PR
   #27429.
+
+## Atomic forkchoice validation
+
+- **Scope:** `reth-engine-tree` direct forkchoice updates, `reth-chain-state` proposed-chain helpers,
+  and Ethereum forkchoice e2e tests.
+- **Source:** backport of upstream Reth commit `a120f00d47e43427816e2fe7e38229fabbb2db87`
+  (PR #27247), with its validation helper as amended by PR #27429.
+- **Purpose:** validate nonzero safe and finalized hashes against the proposed head and chain before
+  changing the canonical head, chain or either marker. Reject unknown and off-branch markers without
+  partially applying an FCU; allow markers on the proposed branch before it becomes canonical.
+- **Compatibility:** reuse the existing #27429 `find_canonical_header` check instead of repeating
+  its canonical-hash lookup, retaining the proposed-head/prefix height bound. Validate the older
+  canonical-ancestor path before its optional configured rewind, preserving its existing marker
+  application behavior. `NewCanonicalChain` helpers and upstream tests are retained. Added engine
+  tests cover rejection before a configured canonical rewind, atomic commit validation, proposed
+  commit markers and unchanged zero-marker semantics. No dependency changes are required.
+- **Removal condition:** remove the backport when the selected upstream Reth base contains PR
+  #27247 and its #27429 follow-up.
 
 ## RPC blocking IO bounds
 
